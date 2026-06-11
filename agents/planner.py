@@ -67,6 +67,15 @@ _TOOL_REQUIRED_PATTERNS = (
     "news", "headlines", "time in", "convert ",
 )
 
+# History caps per call type — planning doesn't need 40 messages of context
+# (runtime logs showed ~1,475 input tokens per plan call).
+_DIRECT_HISTORY_MSGS = 12
+_PLAN_HISTORY_MSGS = 8
+
+# Tool results larger than this are truncated before synthesis — an 8KB file
+# read would otherwise add ~2,000 tokens to the second LLM call.
+_SYNTHESIS_RESULT_CHARS = 1200
+
 
 class PlannerAgent:
     """
@@ -87,6 +96,8 @@ class PlannerAgent:
         self.mcp = mcp_manager
         self.rag = rag_engine
         self.max_steps = max_steps
+        # Tool schemas are static after startup — build once, not per query
+        self._tool_schemas_cache: list[dict] | None = None
         logger.info("PlannerAgent initialized.")
 
     def run(self, query: str) -> AgentResult:
@@ -168,14 +179,21 @@ class PlannerAgent:
                 logger.warning(f"RAG failed: {e}. Falling through to LLM.")
 
         # ── Step 3: LLM function-calling planner ──────────────────────────
-        memory_context = memory.get_context()
+        # Facts only: ask() already sends conversation history, so including
+        # recent turns here would duplicate them in every prompt.
+        memory_context = memory.get_context(include_turns=False)
 
         # Fast-path: if query looks like a general knowledge question and doesn't
         # need a specific tool, call LLM directly (skips one full LLM round trip)
         if self._is_direct_llm_query(query):
             logger.info("Direct LLM path (no tool schema overhead)")
-            answer = self.llm.ask(query, memory_context=memory_context)
+            answer = self.llm.ask(
+                query,
+                memory_context=memory_context,
+                max_history_messages=_DIRECT_HISTORY_MSGS,
+            )
             t_ms = (time.time() - t_start) * 1000
+            logger.info(f"Stage timing: direct_llm={t_ms:.0f}ms")
             steps.append(AgentStep(thought="Direct LLM answer (fast path).", final_answer=answer))
             memory.add_turn("user", query)
             memory.add_turn("assistant", answer)
@@ -185,7 +203,8 @@ class PlannerAgent:
                 total_latency_ms=t_ms,
                 input_tokens=self.llm.last_input_tokens,
                 output_tokens=self.llm.last_output_tokens,
-                success=True,
+                success=self.llm.last_error is None,
+                error=self.llm.last_error,
             )
 
         all_tool_schemas = self._build_tool_schemas()
@@ -193,8 +212,13 @@ class PlannerAgent:
         for step_num in range(self.max_steps):
             logger.debug(f"Planner step {step_num + 1}/{self.max_steps}")
 
-            plan = self.llm.plan(current_query, tool_schemas=all_tool_schemas)
-
+            t_plan = time.time()
+            plan = self.llm.plan(
+                current_query,
+                tool_schemas=all_tool_schemas,
+                max_history_messages=_PLAN_HISTORY_MSGS,
+            )
+            plan_ms = (time.time() - t_plan) * 1000
 
             # Direct LLM answer (no tool needed)
             if isinstance(plan, str):
@@ -214,14 +238,17 @@ class PlannerAgent:
                     total_latency_ms=t_ms,
                     input_tokens=self.llm.last_input_tokens,
                     output_tokens=self.llm.last_output_tokens,
-                    success=True,
+                    success=self.llm.last_error is None,
+                    error=self.llm.last_error,
                 )
 
             # Tool call decision
             tool_name = plan.get("tool", "")
             tool_args = plan.get("args", {})
 
+            t_tool = time.time()
             tool_result, tool_type = self._execute_tool(tool_name, tool_args, current_query)
+            tool_latency_ms = (time.time() - t_tool) * 1000
 
             steps.append(AgentStep(
                 thought=f"LLM chose tool '{tool_name}' with args {tool_args}.",
@@ -230,22 +257,49 @@ class PlannerAgent:
                     tool_name=tool_name,
                     arguments=tool_args,
                     result=tool_result,
-                    latency_ms=(time.time() - t_start) * 1000,
+                    latency_ms=tool_latency_ms,
                 ),
             ))
 
-            if tool_result and not tool_result.startswith("[Error]"):
-                # Synthesize final spoken answer from tool result
+            if tool_result and not self._is_error_result(tool_result):
+                # Synthesize final spoken answer from tool result.
+                # skip_history: the internal synthesis prompt must not be stored
+                # as if the user said it — the real exchange is recorded below.
+                result_for_synthesis = tool_result
+                if len(result_for_synthesis) > _SYNTHESIS_RESULT_CHARS:
+                    result_for_synthesis = (
+                        result_for_synthesis[:_SYNTHESIS_RESULT_CHARS] + "... [truncated]"
+                    )
                 synthesis_prompt = (
                     f"The user asked: '{query}'. "
-                    f"Tool '{tool_name}' returned: {tool_result}. "
+                    f"Tool '{tool_name}' returned: {result_for_synthesis}. "
                     f"Summarize this in 1-2 natural spoken sentences for voice output. "
                     f"No markdown, no bullet points."
                 )
-                final = self.llm.ask(synthesis_prompt, memory_context=memory_context)
+                t_synth = time.time()
+                final = self.llm.ask(
+                    synthesis_prompt, memory_context=memory_context, skip_history=True
+                )
+                synth_ms = (time.time() - t_synth) * 1000
+                logger.info(
+                    f"Stage timing: plan={plan_ms:.0f}ms "
+                    f"tool={tool_latency_ms:.0f}ms synth={synth_ms:.0f}ms"
+                )
+                synthesis_error = self.llm.last_error
+                if synthesis_error:
+                    # The tool succeeded — don't throw its result away just
+                    # because the summarizer is down (seen in runtime logs:
+                    # 503 turned a good directory listing into "I'm having
+                    # trouble connecting").
+                    logger.warning(
+                        f"Synthesis failed ({synthesis_error[:80]}). "
+                        f"Falling back to raw tool output."
+                    )
+                    final = self._raw_result_fallback(tool_result)
                 t_ms = (time.time() - t_start) * 1000
                 steps[-1].final_answer = final
 
+                self.llm.record_turn(query, final)
                 memory.add_turn("user", query)
                 memory.add_turn("assistant", final)
                 return AgentResult(
@@ -257,16 +311,27 @@ class PlannerAgent:
                     total_latency_ms=t_ms,
                     input_tokens=self.llm.last_input_tokens,
                     output_tokens=self.llm.last_output_tokens,
+                    # The tool delivered — a failed synthesis was recovered via
+                    # raw output, so the run still served the user.
                     success=True,
+                    error=synthesis_error,
                 )
 
             # Tool failed — inject failure context and retry
             logger.warning(f"Tool '{tool_name}' failed: {tool_result}")
-            current_query = f"{current_query} (note: tool {tool_name} failed)"
+            reason = (tool_result or "no result")[:150]
+            current_query = (
+                f"{query} (note: tool '{tool_name}' failed with: {reason}. "
+                f"Pick a different tool or answer directly.)"
+            )
 
         # ── Fallback: pure LLM after max steps ────────────────────────────
         logger.info("Max planning steps reached. Falling back to pure LLM.")
-        answer = self.llm.ask(current_query, memory_context=memory_context)
+        answer = self.llm.ask(
+            current_query,
+            memory_context=memory_context,
+            max_history_messages=_DIRECT_HISTORY_MSGS,
+        )
         t_ms = (time.time() - t_start) * 1000
         memory.add_turn("user", query)
         memory.add_turn("assistant", answer)
@@ -279,10 +344,25 @@ class PlannerAgent:
             total_latency_ms=t_ms,
             input_tokens=self.llm.last_input_tokens,
             output_tokens=self.llm.last_output_tokens,
-            success=True,
+            success=self.llm.last_error is None,
+            error=self.llm.last_error,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_error_result(result: str) -> bool:
+        """True if a tool result string signals failure (local or MCP convention)."""
+        return result.startswith("[Error]") or result.startswith("[MCP Error]")
+
+    @staticmethod
+    def _raw_result_fallback(tool_result: str) -> str:
+        """Voice-friendly rendering of a raw tool result, used when the
+        synthesis LLM call fails. Collapses whitespace and truncates."""
+        text = " ".join(tool_result.split())
+        if len(text) > 350:
+            text = text[:350].rsplit(" ", 1)[0] + ", and more"
+        return f"The summarizer is unreachable right now, so here is the raw result. {text}"
 
     def _is_rag_query(self, text: str) -> bool:
         lower = text.lower()
@@ -308,11 +388,14 @@ class PlannerAgent:
                    for p in _DIRECT_LLM_STARTERS)
 
     def _build_tool_schemas(self) -> list[dict]:
-        """Combine local command schemas + MCP tool schemas."""
-        schemas = list(cmd_registry.get_tool_schemas())
-        if self.mcp:
-            schemas.extend(self.mcp.get_tool_schemas())
-        return schemas
+        """Combine local command schemas + MCP tool schemas (cached — both
+        registries are static after startup)."""
+        if self._tool_schemas_cache is None:
+            schemas = list(cmd_registry.get_tool_schemas())
+            if self.mcp:
+                schemas.extend(self.mcp.get_tool_schemas())
+            self._tool_schemas_cache = schemas
+        return self._tool_schemas_cache
 
     def _execute_tool(
         self,
@@ -326,14 +409,15 @@ class PlannerAgent:
         Returns:
             (result_string, ToolType)
         """
-        # Try local command dispatch first
-        local_result = cmd_registry.dispatch(tool_name, tool_args.get("text", original_query))
-        if local_result is not None:
-            return local_result, ToolType.LOCAL
+        # Route by ownership — never probe MCP names against the local
+        # registry (that logged "unknown tool" warnings on every MCP call).
+        if cmd_registry.has_tool(tool_name):
+            local_result = cmd_registry.dispatch(tool_name, tool_args.get("text", original_query))
+            if local_result is not None:
+                return local_result, ToolType.LOCAL
+            return f"[Error] Tool '{tool_name}' declined this request.", ToolType.LOCAL
 
-        # Try MCP tools
-        if self.mcp:
-            mcp_result = self.mcp.call(tool_name, tool_args)
-            return mcp_result, ToolType.MCP
+        if self.mcp and self.mcp.has_tool(tool_name):
+            return self.mcp.call(tool_name, tool_args), ToolType.MCP
 
         return f"[Error] Unknown tool: '{tool_name}'", ToolType.LLM

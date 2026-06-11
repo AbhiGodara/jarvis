@@ -95,10 +95,14 @@ class MemoryManager:
 
     # ── Context for LLM injection ─────────────────────────────────────────
 
-    def get_context(self, max_facts: int = 10) -> str:
+    def get_context(self, max_facts: int = 10, include_turns: bool = True) -> str:
         """
         Build a combined context string for LLM system prompt injection.
         Combines long-term facts + recent short-term turns.
+
+        Pass include_turns=False when the LLM call already carries the
+        conversation history (the planner does) — otherwise recent turns
+        get sent to the model twice.
         """
         parts: list[str] = []
 
@@ -107,10 +111,11 @@ class MemoryManager:
             fact_str = ". ".join(f"User's {k}: {v}" for k, v in facts)
             parts.append(f"[User Facts] {fact_str}.")
 
-        recent = self.get_recent_turns(n=4)
-        if recent:
-            turn_strs = [f"{t.role}: {t.text}" for t in recent]
-            parts.append("[Recent conversation]\n" + "\n".join(turn_strs))
+        if include_turns:
+            recent = self.get_recent_turns(n=4)
+            if recent:
+                turn_strs = [f"{t.role}: {t.text}" for t in recent]
+                parts.append("[Recent conversation]\n" + "\n".join(turn_strs))
 
         return "\n\n".join(parts)
 
