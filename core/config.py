@@ -16,11 +16,14 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-load_dotenv()
-logger = logging.getLogger(__name__)
-
 _ROOT = Path(__file__).parent.parent          # project root
 _CONFIG_PATH = _ROOT / "config.yaml"
+
+# Anchor .env at the project root — a bare load_dotenv() searches from the
+# current working directory and silently misses keys when JARVIS is started
+# from elsewhere.
+load_dotenv(_ROOT / ".env")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,8 +37,6 @@ class Config:
     stt_openai_model: str = "whisper-1"
     stt_timeout: int = 8
     stt_phrase_limit: int = 15
-    stt_energy_threshold: int = 300
-    stt_language: str = "en-US"
 
     # TTS
     tts_engine: str = "openai"
@@ -44,7 +45,12 @@ class Config:
     tts_pyttsx3_rate: int = 165
 
     # LLM
+    # environment: "development" = Gemini only (preserve OpenAI credits),
+    #              "production"  = OpenAI primary, Gemini keys as fallback.
+    # The ENVIRONMENT env var (in .env) overrides this yaml value.
+    environment: str = "development"
     llm_model: str = "gemini-2.5-flash"
+    llm_openai_model: str = "gpt-4o-mini"
     llm_max_history_turns: int = 20
     llm_max_input_chars: int = 500
 
@@ -58,9 +64,6 @@ class Config:
 
     # Notes
     notes_file: str = "notes.txt"
-
-    # Stocks
-    stocks_currency: str = "USD"
 
     # Logging
     log_level: str = "INFO"
@@ -90,14 +93,19 @@ class Config:
 
     # Agent
     agent_max_steps: int = 5
-    agent_think_aloud: bool = False       # log chain-of-thought to console
+
+    # Conversation mode: seconds to wait for a follow-up after responding,
+    # before falling back to wake-word mode. Set to 0 to disable.
+    conversation_followup_secs: int = 8
 
     # Evaluation
     eval_enabled: bool = True
     eval_db_path: str = "evaluation/eval_log.db"
 
     # API keys (loaded from .env)
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))   # legacy single key
+    gemini_api_key1: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY1", ""))
+    gemini_api_key2: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY2", ""))
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     openweather_api_key: str = field(default_factory=lambda: os.getenv("OPENWEATHER_API_KEY", ""))
     news_api_key: str = field(default_factory=lambda: os.getenv("NEWS_API_KEY", ""))
@@ -118,8 +126,13 @@ def load_config(path: Path = _CONFIG_PATH) -> Config:
     filtered = {k: v for k, v in raw.items() if k in valid_fields}
     cfg = Config(**filtered)
 
-    if not cfg.gemini_api_key:
-        logger.error("GEMINI_API_KEY not set. LLM will not work.")
+    # ENVIRONMENT in .env wins over config.yaml
+    env_override = os.getenv("ENVIRONMENT", "").strip().lower()
+    if env_override:
+        cfg.environment = env_override
+
+    if not (cfg.gemini_api_key or cfg.gemini_api_key1 or cfg.openai_api_key):
+        logger.error("No LLM API key set (GEMINI_API_KEY1/GEMINI_API_KEY/OPENAI_API_KEY). LLM will not work.")
     if not cfg.openai_api_key:
         logger.warning("OPENAI_API_KEY not set. STT/TTS will fall back to offline engines.")
 
