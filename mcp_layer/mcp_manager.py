@@ -44,6 +44,9 @@ class MCPManager:
         self._tools: dict[str, MCPTool] = {}
         # Built-in tools run in-process: full tool name → Python callable
         self._builtin_handlers: dict[str, Callable[..., str]] = {}
+        # Tools flagged spoken=True already return a natural spoken sentence —
+        # the planner skips the synthesis LLM call for these.
+        self._spoken_tools: set[str] = set()
 
     def start(self) -> None:
         """Start all MCP servers and discover their tools."""
@@ -142,10 +145,20 @@ class MCPManager:
                 logger.warning(f"Built-in tool '{full}' has no 'fn' — it will not be callable.")
             else:
                 self._builtin_handlers[full] = fn
+            if tool_def.get("spoken", False):
+                self._spoken_tools.add(full)
 
     def has_tool(self, full_tool_name: str) -> bool:
         """True if this tool name (dot or double-underscore form) is registered."""
         return full_tool_name.replace("__", ".") in self._tools
+
+    def is_spoken_result(self, full_tool_name: str) -> bool:
+        """True if this tool's output is already a spoken sentence.
+
+        When True the planner skips the synthesis LLM call, saving ~1.5 s
+        per query.  Set by register_builtin() for tools with 'spoken': True.
+        """
+        return full_tool_name.replace("__", ".") in self._spoken_tools
 
     def is_available(self) -> bool:
         return bool(self._clients) or bool(self._tools)
