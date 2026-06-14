@@ -3,11 +3,11 @@ import datetime
 import pickle
 import logging
 import pytz
-import yaml
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from commands.registry import command
+from core.config import get_config
 
 # Try importing from parent modules for speaking feedback
 try:
@@ -17,14 +17,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Load config
-try:
-    with open("config.yaml", "r") as f:
-        _config = yaml.safe_load(f)
-except Exception:
-    _config = {}
-
-_TIMEZONE_STR = _config.get("calendar_timezone", "UTC")
+_TIMEZONE_STR = get_config().calendar_timezone or "UTC"
 SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 
 MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]

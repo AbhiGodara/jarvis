@@ -1,24 +1,28 @@
-import os
+import re
 import logging
 import subprocess
 import platform
-import yaml
 from commands.registry import command
+from core.config import get_config
 
 logger = logging.getLogger(__name__)
 
-with open("config.yaml", "r") as f:
-    _config = yaml.safe_load(f)
-
-_APPS: dict[str, str] = _config.get("apps", {})
+_APPS: dict[str, str] = get_config().apps
 _SYSTEM = platform.system()  # "Windows", "Linux", "Darwin"
+
+# Strip trigger verbs as whole words only — plain str.replace mangled app
+# names ("launch runescape" → "launch escape").
+_TRIGGER_RE = re.compile(r"\b(open|launch|start|run)\b")
+
+
+def _extract_app_name(text: str) -> str:
+    return " ".join(_TRIGGER_RE.sub(" ", text).split())
 
 
 @command(keywords=["open ", "launch ", "start ", "run "])
 def open_app(text: str) -> str:
     """Open an application or file by voice command."""
-    for trigger in ["open", "launch", "start", "run"]:
-        text = text.replace(trigger, "").strip()
+    text = _extract_app_name(text)
 
     if not text:
         return "Which app would you like me to open?"

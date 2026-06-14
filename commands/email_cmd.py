@@ -1,11 +1,9 @@
-import os
 import logging
 import smtplib
-import yaml
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
 from commands.registry import command
+from core.config import get_config
 
 # Try importing from parent modules for interactive prompting
 try:
@@ -15,17 +13,10 @@ except ImportError:
     speak = None
     listen = None
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-# Load config
-try:
-    with open("config.yaml", "r") as f:
-        _config = yaml.safe_load(f)
-except Exception:
-    _config = {}
-
-_CONTACTS = _config.get("email_contacts", {})
+_cfg = get_config()
+_CONTACTS = _cfg.email_contacts
 
 
 def _get_input(prompt_msg: str) -> str | None:
@@ -51,13 +42,13 @@ def _get_input(prompt_msg: str) -> str | None:
     return response if response else None
 
 
-@command(keywords=["send email", "send an email", "write an email", "mail"])
+@command(keywords=["send email", "send an email", "send a mail", "send mail", "write an email", "compose an email"])
 def send_email_cmd(text: str) -> str:
     """Send an email dynamically by looking up contacts and prompting for content."""
     
     # 1. Check SMTP credentials
-    sender_email = os.getenv("SMTP_SENDER_EMAIL") or _config.get("email_sender")
-    sender_password = os.getenv("SMTP_SENDER_PASSWORD")
+    sender_email = _cfg.smtp_sender_email or _cfg.email_sender
+    sender_password = _cfg.smtp_sender_password
 
     if not sender_email or not sender_password or "your_email" in sender_email or "your_app_password" in sender_password:
         logger.warning("Email credentials are not configured in .env file.")
