@@ -37,9 +37,25 @@ def _try_percentage(text: str) -> str | None:
     return None
 
 
-@command(keywords=["calculate", "what is ", "how much is", "convert ", "times", "divided by", "percent of"])
+# Phrases that look like math triggers but are actually knowledge/weather queries
+_NON_MATH_PHRASES = [
+    "temperature", "weather", "forecast", "who is", "what is the pm",
+    "what is the president", "what is the capital", "who was", "who are",
+    "current", "prime minister", "minister", "president", "governor",
+]
+
+
+@command(
+    keywords=["calculate", "what is ", "how much is", "convert ", "times", "divided by", "percent of"],
+    description="Evaluate math expressions, unit conversions, and calculations"
+)
 def calculate(text: str) -> str:
     """Evaluate maths expressions and perform unit conversions."""
+    # Bail out immediately for knowledge/weather queries — let LLM or weather handle them
+    lower = text.lower()
+    if any(phrase in lower for phrase in _NON_MATH_PHRASES):
+        return None
+
     # Try unit conversion first
     conversion = _try_unit_conversion(text)
     if conversion:
@@ -70,4 +86,5 @@ def calculate(text: str) -> str:
         return f"The answer is {result}."
     except (InvalidExpression, Exception) as e:
         logger.debug(f"Math eval failed for '{text}': {e}")
-        return "I couldn't work that out. Try phrasing it like 'what is 15 times 4'."
+        return None
+

@@ -1,15 +1,12 @@
 import os
 import logging
-import yaml
 from datetime import datetime
 from commands.registry import command
+from core.config import get_config
 
 logger = logging.getLogger(__name__)
 
-with open("config.yaml", "r") as f:
-    _config = yaml.safe_load(f)
-
-_NOTES_FILE = _config.get("notes_file", "notes.txt")
+_NOTES_FILE = get_config().notes_file
 _SAVE_TRIGGERS = ["take a note", "make a note", "note that", "save a note", "add a note"]
 _READ_TRIGGERS = ["read my notes", "what are my notes", "show my notes", "list my notes"]
 
