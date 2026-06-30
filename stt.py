@@ -1,38 +1,47 @@
 """
 Speech-to-Text module for JARVIS.
 
-Primary backend: OpenAI Whisper API (whisper-1)
+Backend: OpenAI Whisper API (whisper-1)
   - No local model download
   - Accurate across accents (including Indian English)
   - ~300-500ms transcription latency
-  - Falls back to pyttsx3-style silence if API is unavailable
 
-Fallback: pyttsx3 offline voice recognition is not available, so
-          on API failure we return None and main.py handles the retry.
+There is no offline STT fallback: on API failure listen() returns None
+and main.py tells the user it didn't catch that.
 """
 import io
 import wave
 import logging
 import numpy as np
 import sounddevice as sd
-import yaml
 import os
 from dotenv import load_dotenv
+
+from core.config import get_config
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# Load config
-try:
-    with open("config.yaml", "r") as f:
-        _config = yaml.safe_load(f)
-except Exception:
-    _config = {}
-
-MIC_INDEX = _config.get("mic_device_index", None)
-STT_BACKEND = _config.get("stt_backend", "openai")
-OPENAI_MODEL = _config.get("stt_openai_model", "whisper-1")
+_cfg = get_config()
+MIC_INDEX = _cfg.mic_device_index
+STT_BACKEND = _cfg.stt_backend
+OPENAI_MODEL = _cfg.stt_openai_model
 SAMPLE_RATE = 16000  # Whisper expects 16kHz mono
+
+# Reuse one OpenAI client across calls — constructing a new client (and
+# connection pool) per transcription added latency to every interaction.
+_openai_client = None
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        from openai import OpenAI
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 
 def _record_audio(timeout: int = 8, phrase_limit: int = 15) -> np.ndarray | None:
@@ -48,7 +57,8 @@ def _record_audio(timeout: int = 8, phrase_limit: int = 15) -> np.ndarray | None
     chunk_duration = 0.1   # 100ms chunks
     chunk_size = int(SAMPLE_RATE * chunk_duration)
     silence_threshold = 0.01    # RMS threshold below which audio is "silent"
-    silence_after_speech = 1.5  # Stop after 1.5s of silence following speech
+    silence_after_speech = 1.2  # Stop after 1.2s of silence — long enough not
+                                # to clip mid-sentence pauses
     
     frames = []
     started_speaking = False
@@ -118,13 +128,11 @@ def _numpy_to_wav_bytes(audio: np.ndarray) -> bytes:
 def _transcribe_openai(audio: np.ndarray) -> str | None:
     """Send audio to OpenAI Whisper API and return transcript."""
     try:
-        from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        client = _get_openai_client()
+        if client is None:
             logger.error("OPENAI_API_KEY not set. Add it to your .env file.")
             return None
 
-        client = OpenAI(api_key=api_key)
         wav_bytes = _numpy_to_wav_bytes(audio)
 
         audio_file = io.BytesIO(wav_bytes)
@@ -135,11 +143,34 @@ def _transcribe_openai(audio: np.ndarray) -> str | None:
             model=OPENAI_MODEL,
             file=audio_file,
             language="en",
-            response_format="text"
+            response_format="text",
+            # Prompt Whisper with the assistant name and context so it
+            # transcribes "Jarvis" correctly instead of mishearing it as
+            # "Yavish", "Travis", etc. (common with Indian English accent).
+            prompt=(
+                "This is a voice command to JARVIS, an AI assistant. "
+                "The speaker may start with 'Jarvis', 'Hey Jarvis', or go "
+                "straight to a command. "
+                "Commands the speaker uses: read file, list directory, create "
+                "file, write file, check weather in [city], play [song] on "
+                "YouTube, open [app], send email to [contact], set reminder "
+                "for [task], what time is it, check [stock] price, "
+                "search the web, take a screenshot, add note. "
+                "The speaker is using Indian English. Common place names: "
+                "Bikaner, Jaipur, Delhi, Mumbai, Chandigarh, Lucknow, "
+                "Hyderabad, Bangalore, Kolkata, Chennai, Pune, Ahmedabad. "
+                "Indian stock indices: Nifty, Sensex, BSE, NSE. "
+                "Stock names: Infosys, TCS, Reliance, Wipro, HDFC, ICICI."
+            )
         )
         text = transcript.strip() if isinstance(transcript, str) else transcript.text.strip()
         logger.info(f"Heard: '{text}'")
-        return text.lower() if text else None
+        if text:
+            return text.lower()
+        # Whisper returned an empty transcript: audio was detected but was
+        # noise, a cough, or a very short sound.  Return "" (not None) so
+        # the caller can distinguish "noise heard" from "silence timeout".
+        return ""
 
     except Exception as e:
         logger.error(f"OpenAI Whisper transcription failed: {e}")
