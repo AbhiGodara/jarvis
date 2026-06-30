@@ -18,10 +18,15 @@ Architecture:
                        ├── RAG engine (document-grounded Q&A)
                        ├── MCP tools (filesystem, custom servers)
                        └── LLM (open-ended reasoning + function calling)
+
+Conversation mode:
+  After each response JARVIS stays listening for a follow-up command for
+  `conversation_followup_secs` seconds (configurable). Only returns to
+  wake-word idle mode if the user goes silent. Set conversation_followup_secs
+  to 0 in config.yaml to always require "hey jarvis".
 """
 import atexit
 import logging
-import threading
 import time
 from pathlib import Path
 
@@ -40,7 +45,7 @@ logger = logging.getLogger(__name__)
 # ── Module imports ─────────────────────────────────────────────────────────────
 from wake_word import wait_for_wake_word, load_model
 from stt import listen
-from tts import speak, stop as stop_tts
+from tts import speak, stop as stop_tts, preload as preload_tts, speak_offline
 from llm import LLMClient
 from agents.planner import PlannerAgent
 from commands.registry import auto_discover
@@ -71,21 +76,28 @@ def _speak(text: str) -> None:
     speak(text)
 
 
-def _speak_async(text: str) -> None:
-    threading.Thread(target=_speak, args=(text,), daemon=True).start()
+# Exact wake word + common Whisper mishearings of "Jarvis" with Indian English.
+# Sorted longest-first so "hey yavish" is stripped before "yavish".
+_WAKE_PREFIXES = sorted([
+    "hey jarvis", "jarvis",
+    "hey yavish", "yavish",   # Most common Indian-accent Whisper mishearing
+    "hey travis", "travis",
+    "hey jarvish", "jarvish",
+    "hey service", "hey harris",
+], key=len, reverse=True)
 
 
 def _strip_wake_word(text: str) -> str:
     """Remove accidental wake-word transcription from the start of a command."""
-    for prefix in ["hey jarvis", "jarvis"]:
+    for prefix in _WAKE_PREFIXES:
         if text.startswith(prefix):
-            text = text[len(prefix):].strip()
+            return text[len(prefix):].strip()
     return text
 
 
 def _on_shutdown() -> None:
     logger.info("JARVIS shutting down.")
-    _speak("Going offline. Goodbye.")
+    speak_offline("Going offline. Goodbye, sir.")
 
 
 atexit.register(_on_shutdown)
@@ -122,7 +134,7 @@ def _init_mcp() -> "MCPManager | None":
 
 def _init_rag(llm: "LLMClient") -> "RAGEngine | None":
     """Initialize ChromaDB vector store and RAG engine.
-    
+
     Skips loading the ~80MB embedding model if there are no real user
     documents in the docs/ folder (only README.md doesn't count).
     """
@@ -220,62 +232,129 @@ def main() -> None:
     wake_model = load_model(cfg.wake_word)
 
     logger.info("JARVIS is ready.")
-    _speak("JARVIS online. Agentic mode active.")
+    # Preload activation greeting in background — plays from cache on first hit.
+    import threading
+    threading.Thread(
+        target=preload_tts, args=("Yes, sir?",), daemon=True
+    ).start()
+    # Use offline TTS for startup: OpenAI TTS can take 30+ s with retries and
+    # would block the wake-word listener.  pyttsx3 speaks in < 100 ms.
+    speak_offline("JARVIS online, sir. Ready when you are.")
 
     # ── Main loop ─────────────────────────────────────────────────────────
-    while True:
+    # Outer loop: idle → wake word → conversation session → idle
+    # Inner loop: conversation session (multiple turns without re-waking)
+    should_exit = False
+
+    while not should_exit:
         try:
-            # Phase 1: Wait for wake word (uses pre-loaded model)
+            # ── Idle: wait for wake word ──────────────────────────────────
             wait_for_wake_word(oww=wake_model, model_name=cfg.wake_word)
             stop_tts()
-            _speak("Yes?")
+            _speak("Yes, sir?")
 
-            # Phase 2: Listen for command
-            t_stt = time.time()
-            command = listen(timeout=cfg.stt_timeout, phrase_limit=cfg.stt_phrase_limit)
-            logger.info(f"Stage timing: stt={((time.time() - t_stt) * 1000):.0f}ms (incl. waiting for speech)")
+            # ── Conversation session ──────────────────────────────────────
+            # is_first: True for the first command after wake, False for follow-ups.
+            # Follow-ups use a shorter timeout so we return to idle quickly on
+            # silence, without making the user wait 8 s for the first command.
+            is_first_listen = True
 
-            if not command:
-                _speak("I didn't catch that.")
-                continue
+            while not should_exit:
+                # Scale the follow-up timeout with the previous response length:
+                # a long response takes longer to speak, so the user needs more
+                # time to collect their thoughts before responding.
+                _prev_response_chars = getattr(_speak, "_last_response_chars", 0)
+                follow_up_timeout = cfg.conversation_followup_secs + min(
+                    _prev_response_chars // 60, 6
+                )
+                listen_timeout = (
+                    cfg.stt_timeout if is_first_listen
+                    else follow_up_timeout
+                )
 
-            command = _strip_wake_word(command.strip())
-            if not command:
-                continue
+                t_stt = time.time()
+                command = listen(timeout=listen_timeout, phrase_limit=cfg.stt_phrase_limit)
+                logger.info(
+                    f"Stage timing: stt={((time.time() - t_stt) * 1000):.0f}ms "
+                    f"(incl. waiting for speech)"
+                )
 
-            logger.info(f"Command: '{command}'")
+                if command is None:
+                    # True silence: user said nothing within the timeout window
+                    if is_first_listen:
+                        _speak("I didn't catch that, sir.")
+                    break
 
-            # Phase 3: Stop keyword check
-            if _is_stop_command(command):
-                logger.info("Stop command — exiting loop.")
-                break
+                if command == "":
+                    # Whisper returned empty: audio was brief noise / a cough /
+                    # an echo — NOT intentional speech.  Don't drop the
+                    # conversation; give one more chance with a short window.
+                    logger.info("STT returned empty (noise). Retrying once.")
+                    command = listen(
+                        timeout=min(follow_up_timeout, 6),
+                        phrase_limit=cfg.stt_phrase_limit,
+                    )
+                    if not command:   # still nothing or noise → give up
+                        break
 
-            # Phase 4: Truncate if excessively long
-            if len(command) > cfg.llm_max_input_chars:
-                command = command[:cfg.llm_max_input_chars]
+                command = _strip_wake_word(command.strip())
+                if not command:
+                    break
 
-            # Phase 5: Planner Agent processes command
-            result = planner.run(command)
-            logger.info(
-                f"Result: tool={result.tool_type_used.value}/{result.tool_name_used} "
-                f"latency={result.total_latency_ms:.0f}ms"
-            )
+                logger.info(f"Command: '{command}'")
 
-            # Phase 6: Log evaluation
-            if eval_logger:
-                eval_logger.log(result)
+                if _is_stop_command(command):
+                    logger.info("Stop command — exiting loop.")
+                    should_exit = True
+                    break
 
-            # Phase 7: Speak response
-            response = result.response
-            logger.info(f"Response: '{response[:80]}{'...' if len(response) > 80 else ''}'")
-            _speak_async(response)
+                # Truncate runaway transcriptions
+                if len(command) > cfg.llm_max_input_chars:
+                    command = command[:cfg.llm_max_input_chars]
+
+                # ── Process command ───────────────────────────────────────
+                result = planner.run(command)
+                logger.info(
+                    f"Result: tool={result.tool_type_used.value}/{result.tool_name_used} "
+                    f"latency={result.total_latency_ms:.0f}ms"
+                )
+
+                if eval_logger:
+                    eval_logger.log(result)
+
+                response = result.response
+                logger.info(f"Response: '{response[:80]}{'...' if len(response) > 80 else ''}'")
+
+                # Speak synchronously — must finish before we listen again,
+                # otherwise the mic captures JARVIS's own voice.
+                # Store length so the follow-up timeout can scale.
+                _speak._last_response_chars = len(response)  # type: ignore[attr-defined]
+                _speak(response)
+
+                # Conversation mode disabled — go back to wake word after reply
+                if cfg.conversation_followup_secs <= 0:
+                    break
+
+                # After launching external media (YouTube, apps), the mic will
+                # immediately pick up audio from the browser/application.
+                # Exit conversation mode so the user has to say "hey jarvis"
+                # again when they're done watching/using it.
+                if response.lower().startswith("opening ") or response.lower().startswith("launching "):
+                    break
+
+                # Echo-guard: longer response = more room reverb to decay.
+                # Formula: 0.5 s base + 3 ms per character, capped at 1.5 s.
+                echo_guard_s = min(0.5 + len(response) * 0.003, 1.5)
+                time.sleep(echo_guard_s)
+                is_first_listen = False
+                # Inner loop continues: listen for follow-up with short timeout
 
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt.")
-            break
+            should_exit = True
         except Exception as e:
             logger.exception(f"Unexpected error: {e}")
-            _speak("Something went wrong. I'll keep listening.")
+            _speak("Something went wrong, sir. I'll keep listening.")
 
     # ── Shutdown ──────────────────────────────────────────────────────────
     if mcp_manager:
