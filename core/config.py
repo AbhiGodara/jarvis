@@ -42,7 +42,14 @@ class Config:
     tts_engine: str = "openai"
     tts_openai_voice: str = "onyx"
     tts_openai_model: str = "tts-1"
+    # Natural-language delivery steering (gpt-4o-* TTS models only; ignored by tts-1).
+    tts_openai_instructions: str = ""
     tts_pyttsx3_rate: int = 165
+    # Hard timeout for OpenAI TTS API calls.  If the response doesn't start
+    # arriving within this many seconds, fall back to pyttsx3 instantly.
+    # From India, OpenAI audio endpoint sometimes takes 20+ s — set low to
+    # prevent JARVIS from going silent mid-conversation.
+    tts_openai_timeout: int = 7
 
     # LLM
     # environment: "development" = Gemini only (preserve OpenAI credits),
