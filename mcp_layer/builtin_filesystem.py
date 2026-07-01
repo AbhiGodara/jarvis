@@ -11,7 +11,8 @@ flag in BUILTIN_TOOLS tells the planner to skip synthesis.
 
 Tools provided:
   filesystem.read_file          Read a text file
-  filesystem.write_file         Create or overwrite a text file
+  filesystem.write_file         Create or replace a text file
+  filesystem.append_file        Add text to the end of a file (keeps contents)
   filesystem.list_directory     List files in a directory
   filesystem.search_files       Find files matching a pattern
   filesystem.get_file_info      Stat a file (size, modified, type)
@@ -86,6 +87,29 @@ def write_file(path: str, content: str) -> str:
         return f"Done, sir. {p.name} has been written to {p.parent.name}."
     except Exception as e:
         return f"[Error] Could not write {path}: {e}"
+
+
+def append_file(path: str, content: str) -> str:
+    """Append text to the end of a file, creating it if it doesn't exist.
+
+    Unlike write_file this preserves what's already there — the right tool for
+    'add a note', 'append to notes.txt', etc.
+    """
+    p = Path(path).expanduser()
+    if not _is_safe_path(p):
+        return "I can't write to that location, sir — it's outside the allowed directories."
+    if p.name.lower() in _SENSITIVE_NAMES:
+        return f"I won't modify {p.name}, sir — it's a protected file."
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        existing = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+        # Separate the new text onto its own line so entries don't run together.
+        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+        with p.open("a", encoding="utf-8") as f:
+            f.write(prefix + content + "\n")
+        return f"Done, sir. I've added that to {p.name}."
+    except Exception as e:
+        return f"[Error] Could not append to {path}: {e}"
 
 
 def list_directory(path: str = ".") -> str:
@@ -209,17 +233,37 @@ BUILTIN_TOOLS: dict[str, Any] = {
     "write_file": {
         "fn": write_file,
         "description": (
-            "Create a new file or overwrite an existing one with text content. "
-            "Parent directories are created automatically if they do not exist — "
-            "never ask the user to create the folder first. "
-            "Use this when the user says 'create a file', 'write to a file', "
-            "'save content to a file', 'make a file', or 'write my name is...'."
+            "Create a NEW file, or REPLACE the entire contents of an existing "
+            "one, with the given text. Parent directories are created "
+            "automatically — never ask the user to create the folder first. "
+            "Use this for 'create a file', 'make a file', or 'save this as a "
+            "file'. Do NOT use this to add to a file that already has content "
+            "(it erases what's there) — use append_file for 'add to' requests."
         ),
         "schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Absolute or relative file path to write"},
                 "content": {"type": "string", "description": "Text content to write into the file"},
+            },
+            "required": ["path", "content"]
+        },
+        "spoken": True,
+    },
+    "append_file": {
+        "fn": append_file,
+        "description": (
+            "Add text to the END of a file without erasing its current "
+            "contents (creates the file if it's missing). Use this whenever the "
+            "user says 'add to', 'append to', 'add a note to', or 'add "
+            "something to' a file — e.g. adding a line to notes.txt. Always "
+            "prefer this over write_file for 'add' requests."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to append to"},
+                "content": {"type": "string", "description": "Text to add to the end of the file"},
             },
             "required": ["path", "content"]
         },
