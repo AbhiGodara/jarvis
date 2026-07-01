@@ -245,6 +245,10 @@ def main() -> None:
     # Outer loop: idle → wake word → conversation session → idle
     # Inner loop: conversation session (multiple turns without re-waking)
     should_exit = False
+    # Length of the previous spoken response — used to scale the follow-up
+    # listen window (a longer answer takes longer to speak, so the user needs
+    # more time to reply). Persists across turns; 0 before the first response.
+    last_response_chars = 0
 
     while not should_exit:
         try:
@@ -263,9 +267,8 @@ def main() -> None:
                 # Scale the follow-up timeout with the previous response length:
                 # a long response takes longer to speak, so the user needs more
                 # time to collect their thoughts before responding.
-                _prev_response_chars = getattr(_speak, "_last_response_chars", 0)
                 follow_up_timeout = cfg.conversation_followup_secs + min(
-                    _prev_response_chars // 60, 6
+                    last_response_chars // 60, 6
                 )
                 listen_timeout = (
                     cfg.stt_timeout if is_first_listen
@@ -328,7 +331,7 @@ def main() -> None:
                 # Speak synchronously — must finish before we listen again,
                 # otherwise the mic captures JARVIS's own voice.
                 # Store length so the follow-up timeout can scale.
-                _speak._last_response_chars = len(response)  # type: ignore[attr-defined]
+                last_response_chars = len(response)
                 _speak(response)
 
                 # Conversation mode disabled — go back to wake word after reply
