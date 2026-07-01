@@ -29,8 +29,28 @@ _cfg = get_config()
 TTS_ENGINE = _cfg.tts_engine
 OPENAI_VOICE = _cfg.tts_openai_voice
 OPENAI_TTS_MODEL = _cfg.tts_openai_model
+OPENAI_TTS_INSTRUCTIONS = _cfg.tts_openai_instructions
 PYTTSX3_RATE = _cfg.tts_pyttsx3_rate
 OPENAI_TTS_TIMEOUT = _cfg.tts_openai_timeout
+
+
+def _speech_request_kwargs(text: str) -> dict:
+    """Build the args for the OpenAI speech endpoint, shared by preload and speak.
+
+    'instructions' (delivery steering — tone, pace, steady volume) is only
+    accepted by the gpt-4o-* TTS models, so it's omitted for tts-1/tts-1-hd to
+    avoid an API error.
+    """
+    kwargs = dict(
+        model=OPENAI_TTS_MODEL,
+        voice=OPENAI_VOICE,
+        input=text,
+        response_format="pcm",
+        timeout=OPENAI_TTS_TIMEOUT,
+    )
+    if OPENAI_TTS_INSTRUCTIONS and "gpt-4o" in OPENAI_TTS_MODEL:
+        kwargs["instructions"] = OPENAI_TTS_INSTRUCTIONS
+    return kwargs
 
 # OpenAI PCM output: 24 kHz, 16-bit signed, mono
 _TTS_SAMPLE_RATE = 24000
@@ -77,11 +97,7 @@ def preload(text: str) -> None:
         client = _get_openai_client()
         chunks: list[bytes] = []
         with client.audio.speech.with_streaming_response.create(
-            model=OPENAI_TTS_MODEL,
-            voice=OPENAI_VOICE,
-            input=text,
-            response_format="pcm",
-            timeout=OPENAI_TTS_TIMEOUT,
+            **_speech_request_kwargs(text)
         ) as response:
             for chunk in response.iter_bytes(chunk_size=4096):
                 if chunk:
@@ -128,46 +144,89 @@ def speak(text: str, **kwargs) -> None:
         _speak_pyttsx3(text)
 
 
+def _play_pcm_array(audio: np.ndarray) -> None:
+    """Play a decoded int16 PCM array to completion via a drained OutputStream.
+
+    Written in small blocks so stop() (via _stop_requested) can interrupt
+    promptly, and stopped (not aborted) so the final block is never clipped.
+    """
+    if audio is None or len(audio) == 0:
+        return
+    block = _TTS_SAMPLE_RATE // 5   # 0.2 s
+    stream = sd.OutputStream(samplerate=_TTS_SAMPLE_RATE, channels=1, dtype="int16")
+    stream.start()
+    try:
+        for i in range(0, len(audio), block):
+            if _stop_requested.is_set():
+                break
+            stream.write(audio[i:i + block])
+    finally:
+        _close_stream(stream)
+
+
+def _close_stream(stream) -> None:
+    """Drain (or abort, if interrupted) and close an output stream.
+
+    stop() lets PortAudio play out what is already buffered — that final drain
+    is what keeps the tail of a sentence from being cut off. abort() is only for
+    a real interrupt, where cutting the audio short is the whole point.
+    """
+    try:
+        if _stop_requested.is_set():
+            stream.abort()
+        else:
+            stream.stop()
+    except Exception:
+        pass
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
 def _speak_openai(text: str) -> None:
     """
-    Download PCM from OpenAI TTS and play via sounddevice.
+    Stream PCM from OpenAI TTS straight to the sound device as it downloads.
 
-    Uses response_format='pcm' (raw 24kHz int16) which avoids MP3 encode/
-    decode overhead. We collect all chunks (fast network download) then play
-    via sd.play()+sd.wait(), which is the simplest correct way to ensure
-    the full audio plays before we return.
+    Uses response_format='pcm' (raw 24kHz int16) — no MP3 decode — and writes
+    each chunk to an sd.OutputStream the moment it arrives, so speech begins
+    almost immediately instead of after the whole file downloads. Blocking
+    writes pace playback naturally, and a drained stop() plays every last
+    sample (the old buffer-then-sd.play path could clip the tail on some
+    devices).
     """
     client = _get_openai_client()
     logger.debug(f"OpenAI TTS: {len(text)} chars, voice={OPENAI_VOICE}")
 
-    # Serve from cache if this phrase was preloaded
+    # Serve from cache if this phrase was preloaded.
     cached = _audio_cache.get(text)
     if cached is not None:
         logger.debug(f"TTS cache hit: '{text}'")
-        audio = cached
-    else:
-        pcm_chunks: list[bytes] = []
+        _play_pcm_array(cached)
+        return
+
+    stream = sd.OutputStream(samplerate=_TTS_SAMPLE_RATE, channels=1, dtype="int16")
+    stream.start()
+    leftover = b""
+    try:
         with client.audio.speech.with_streaming_response.create(
-            model=OPENAI_TTS_MODEL,
-            voice=OPENAI_VOICE,
-            input=text,
-            response_format="pcm",
-            timeout=OPENAI_TTS_TIMEOUT,
+            **_speech_request_kwargs(text)
         ) as response:
             for chunk in response.iter_bytes(chunk_size=4096):
                 if _stop_requested.is_set():
-                    return
-                if chunk:
-                    pcm_chunks.append(chunk)
-
-        if not pcm_chunks or _stop_requested.is_set():
-            return
-
-        audio = np.frombuffer(b"".join(pcm_chunks), dtype=np.int16)
-    sd.play(audio, samplerate=_TTS_SAMPLE_RATE)
-    # sd.wait() blocks until playback finishes.
-    # stop() calls sd.stop() which causes sd.wait() to return immediately.
-    sd.wait()
+                    break
+                if not chunk:
+                    continue
+                data = leftover + chunk
+                # int16 samples are 2 bytes — carry a trailing odd byte over so
+                # we never split a sample across writes (that adds a click).
+                usable = len(data) - (len(data) % 2)
+                leftover, block = data[usable:], data[:usable]
+                if block:
+                    stream.write(np.frombuffer(block, dtype=np.int16))
+    finally:
+        _close_stream(stream)
 
 
 def speak_offline(text: str) -> None:
