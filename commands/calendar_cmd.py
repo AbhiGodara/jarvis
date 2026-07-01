@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import os
 import datetime
 import pickle
 import logging
+from typing import Any
+
 import pytz
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -25,7 +29,7 @@ DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sun
 DAY_EXTENSIONS = ["rd", "th", "st", "nd"]
 
 
-def _authenticate_google() -> tuple[any, str | None]:
+def _authenticate_google() -> tuple[Any, str | None]:
     """
     Authenticate with Google Calendar API.
     Returns:

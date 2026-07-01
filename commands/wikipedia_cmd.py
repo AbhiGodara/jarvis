@@ -4,31 +4,64 @@ from commands.registry import command
 
 logger = logging.getLogger(__name__)
 
+# Queries containing these words are time-sensitive — Wikipedia's static content
+# will give wrong/outdated answers. Let the LLM handle them instead.
+_LLM_ONLY_PHRASES = [
+    "current", "latest", "now", "today", "right now",
+    "presently", "at the moment", "recently", "new",
+]
 
-@command(keywords=["wikipedia", "wiki", "who is", "tell me about"])
+# Phrases to strip from the search query
+_STRIP_PHRASES = ["wikipedia", "wiki", "who is", "tell me about", "what is", "search for"]
+
+
+def _should_use_llm(text: str) -> bool:
+    """Return True if this query should bypass Wikipedia and go to LLM."""
+    lower = text.lower()
+    return any(phrase in lower for phrase in _LLM_ONLY_PHRASES)
+
+
+@command(
+    keywords=["wikipedia", "wiki", "who is", "tell me about"],
+    description="Search Wikipedia for information about a topic or person"
+)
 def search_wikipedia(text: str) -> str:
-    """Fetch a brief Wikipedia summary and return it as a spoken response."""
-    for trigger in ["wikipedia", "wiki", "who is", "tell me about"]:
-        text = text.replace(trigger, "").strip()
+    """Search Wikipedia for a topic and return a brief spoken summary."""
+    # Let LLM handle time-sensitive questions ("current PM", "latest news", etc.)
+    if _should_use_llm(text):
+        logger.info(f"Wikipedia: deferring time-sensitive query to LLM: '{text}'")
+        return None  # None tells the registry to fall through to LLM
 
-    if not text:
-        return "What topic should I look up?"
+    # Strip trigger phrases from search query
+    query = text
+    for phrase in _STRIP_PHRASES:
+        query = query.replace(phrase, "").strip()
+
+    # Clean up extra whitespace and punctuation
+    query = " ".join(query.split()).strip("?!.,;: ")
+
+    if not query:
+        return "What topic should I look up on Wikipedia?"
+
+    logger.info(f"Wikipedia search: '{query}'")
 
     try:
-        summary = wikipedia.summary(text, sentences=2)
+        summary = wikipedia.summary(query, sentences=2, auto_suggest=True)
         return summary
 
     except wikipedia.DisambiguationError as e:
-        logger.debug(f"Disambiguation for '{text}': {e.options[:3]}")
+        logger.debug(f"Disambiguation for '{query}': {e.options[:3]}")
         try:
             return wikipedia.summary(e.options[0], sentences=2)
         except Exception:
             options = ", ".join(e.options[:3])
-            return f"There are multiple results. Did you mean {options}?"
+            return f"There are multiple results for that. Did you mean: {options}?"
 
     except wikipedia.PageError:
-        return f"I couldn't find a Wikipedia page for {text}."
+        # Don't return an error — return None so LLM gets a chance
+        logger.info(f"No Wikipedia page for '{query}'. Deferring to LLM.")
+        return None
 
     except Exception as e:
         logger.error(f"Wikipedia lookup failed: {e}")
-        return "The Wikipedia lookup failed. Please try again."
+        return None  # Let LLM handle it
