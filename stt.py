@@ -56,12 +56,18 @@ def _record_audio(timeout: int = 8, phrase_limit: int = 15) -> np.ndarray | None
     """
     chunk_duration = 0.1   # 100ms chunks
     chunk_size = int(SAMPLE_RATE * chunk_duration)
-    silence_threshold = 0.01    # RMS threshold below which audio is "silent"
+    silence_threshold = 0.015   # RMS threshold below which audio is "silent"
     silence_after_speech = 1.2  # Stop after 1.2s of silence — long enough not
                                 # to clip mid-sentence pauses
-    
+    # Require at least this much *voiced* audio, otherwise it's a cough, a room
+    # echo of JARVIS's own voice, or a keyboard click — not a command. Sending
+    # such clips to Whisper is the main source of hallucinated transcripts
+    # ("Thank you.", "For more information visit www...").
+    min_voiced_chunks = 4       # 0.4 s of actual speech
+
     frames = []
     started_speaking = False
+    voiced_chunks = 0
     silent_chunks = 0
     elapsed = 0.0
     silent_chunks_needed = int(silence_after_speech / chunk_duration)
@@ -87,6 +93,7 @@ def _record_audio(timeout: int = 8, phrase_limit: int = 15) -> np.ndarray | None
                     if not started_speaking:
                         logger.info("Speech detected, recording...")
                         started_speaking = True
+                    voiced_chunks += 1
                     silent_chunks = 0
                     frames.append(chunk.copy())
                 else:
@@ -107,7 +114,11 @@ def _record_audio(timeout: int = 8, phrase_limit: int = 15) -> np.ndarray | None
         logger.error(f"Microphone recording failed: {e}")
         return None
 
-    if not frames:
+    if not frames or voiced_chunks < min_voiced_chunks:
+        logger.info(
+            f"Discarding clip: only {voiced_chunks} voiced chunks "
+            f"(< {min_voiced_chunks}) — treating as noise/echo, not speech."
+        )
         return None
 
     return np.concatenate(frames, axis=0)
@@ -123,6 +134,37 @@ def _numpy_to_wav_bytes(audio: np.ndarray) -> bytes:
         wf.writeframes(audio.tobytes())
     buf.seek(0)
     return buf.read()
+
+
+# Phrases Whisper invents on silence, breath, or echo of JARVIS's own voice —
+# they come from its YouTube-caption training data and are never real commands.
+_HALLUCINATION_EXACT = {
+    "you", "you.", ".", "!", "?", "so", "so.", "um", "uh", "uhh", "hmm", "mm",
+}
+_HALLUCINATION_SUBSTRINGS = (
+    "for more information",
+    "visit www",
+    "thanks for watching",
+    "thank you for watching",
+    "please subscribe",
+    "like and subscribe",
+    "subscribe to",
+    "see you in the next video",
+    "see you next time",
+    "amara.org",
+    "subtitles by",
+    "subtitled by",
+)
+
+
+def _is_hallucination(text: str) -> bool:
+    """True if a transcript is a known Whisper hallucination, not a real command."""
+    if not text:
+        return False
+    norm = text.strip().lower()
+    if norm in _HALLUCINATION_EXACT:
+        return True
+    return any(s in norm for s in _HALLUCINATION_SUBSTRINGS)
 
 
 def _transcribe_openai(audio: np.ndarray) -> str | None:
@@ -143,27 +185,29 @@ def _transcribe_openai(audio: np.ndarray) -> str | None:
             model=OPENAI_MODEL,
             file=audio_file,
             language="en",
-            response_format="text",
-            # Prompt Whisper with the assistant name and context so it
-            # transcribes "Jarvis" correctly instead of mishearing it as
-            # "Yavish", "Travis", etc. (common with Indian English accent).
+            # "json" is supported by every STT model (whisper-1 AND the newer
+            # gpt-4o-transcribe / gpt-4o-mini-transcribe, which reject "text").
+            # The response handling below reads .text off the JSON object.
+            response_format="json",
+            # temperature=0 makes transcription deterministic and far less prone
+            # to inventing text on unclear audio (a documented cause of the
+            # "Thank you." / "visit www..." hallucinations).
+            temperature=0,
+            # A SHORT, focused prompt biases spelling of hard words (Jarvis,
+            # RAG, notes.txt) without the long-prompt "keep talking" effect
+            # that itself induces hallucinations.
             prompt=(
-                "This is a voice command to JARVIS, an AI assistant. "
-                "The speaker may start with 'Jarvis', 'Hey Jarvis', or go "
-                "straight to a command. "
-                "Commands the speaker uses: read file, list directory, create "
-                "file, write file, check weather in [city], play [song] on "
-                "YouTube, open [app], send email to [contact], set reminder "
-                "for [task], what time is it, check [stock] price, "
-                "search the web, take a screenshot, add note. "
-                "The speaker is using Indian English. Common place names: "
-                "Bikaner, Jaipur, Delhi, Mumbai, Chandigarh, Lucknow, "
-                "Hyderabad, Bangalore, Kolkata, Chennai, Pune, Ahmedabad. "
-                "Indian stock indices: Nifty, Sensex, BSE, NSE. "
-                "Stock names: Infosys, TCS, Reliance, Wipro, HDFC, ICICI."
+                "Voice command to JARVIS, an AI assistant. Indian English. "
+                "Terms: JARVIS, RAG, MCP, notes.txt, YouTube, Nifty, Sensex, "
+                "Bikaner, Jaipur, Delhi, TCS, Reliance, Infosys."
             )
         )
         text = transcript.strip() if isinstance(transcript, str) else transcript.text.strip()
+
+        if _is_hallucination(text):
+            logger.info(f"Ignoring likely Whisper hallucination: '{text}'")
+            return ""
+
         logger.info(f"Heard: '{text}'")
         if text:
             return text.lower()
