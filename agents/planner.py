@@ -77,6 +77,10 @@ _TOOL_REQUIRED_PATTERNS = (
     "make file", "make a file", "save file",
     "list files", "list directory", "show files",
     "file status", "file info",
+    # Catch natural write phrasings the "write ..." direct-LLM starter would
+    # otherwise swallow ("write my name to a file", "save this into a file"),
+    # leaving the LLM to *claim* it wrote a file without calling the tool.
+    "to a file", "into a file", "in a file", "to the file",
 )
 
 # History caps per call type — planning doesn't need 40 messages of context
