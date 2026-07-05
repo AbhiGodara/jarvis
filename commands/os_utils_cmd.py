@@ -9,7 +9,10 @@ from commands.registry import command
 logger = logging.getLogger(__name__)
 
 
-@command(keywords=["screenshot", "capture the screen", "capture screen", "switch window", "switch the window", "hide files", "make files visible", "show files"])
+# NOTE: no "show files"/"list files" keyword here — those are directory-listing
+# requests owned by the filesystem MCP tools via the planner. This command only
+# toggles the hidden attribute on notes/logs.
+@command(keywords=["screenshot", "capture the screen", "capture screen", "switch window", "switch the window", "hide files", "hide my files", "unhide files", "make files visible", "show hidden files"])
 def os_utilities(text: str) -> str:
     """Handle desktop utilities like screenshot, window switching, and file visibility."""
     lower_text = text.lower()
@@ -57,27 +60,9 @@ def os_utilities(text: str) -> str:
             return "I was unable to switch windows."
 
     # --- 3. Hide / Show Files in Current Folder (Windows only) ---
-    elif any(kw in lower_text for kw in ["hide files", "hide this folder"]):
-        if platform.system() != "Windows":
-            return "Hiding files via attrib is only supported on Windows."
-        try:
-            # Hide the folder files (excluding python scripts and git metadata is complex,
-            # so we just run standard attrib in the folder as JARVIS-master did, but logs a warning)
-            logger.info("Hiding files in current directory...")
-            # We target files in the current folder, not the whole venv or git directories to avoid breaking things!
-            # Let's run it just for specific files in CWD or generally in CWD without subdirectories (/s /d might hide venv which is bad)
-            # JARVIS-master ran: os.system("attrib +h /s /d")
-            # Let's just do "attrib +h" for standard text/log/config files to be safe, or just hide/unhide notes.txt and logs.
-            # To match JARVIS-master behavior but make it safer, we only hide notes.txt and logs:
-            os.system("attrib +h notes.txt")
-            if os.path.exists("jarvis.log"):
-                os.system("attrib +h jarvis.log")
-            return "I have hidden your sensitive notes and logs."
-        except Exception as e:
-            logger.error(f"Hiding files failed: {e}")
-            return "I could not hide the files."
-
-    elif any(kw in lower_text for kw in ["visible", "show files"]):
+    # Unhide is checked first: "unhide files" contains the substring
+    # "hide files", so the reverse order would re-hide instead.
+    elif any(kw in lower_text for kw in ["visible", "unhide", "show hidden"]):
         if platform.system() != "Windows":
             return "Showing files via attrib is only supported on Windows."
         try:
@@ -89,5 +74,20 @@ def os_utilities(text: str) -> str:
         except Exception as e:
             logger.error(f"Unhiding files failed: {e}")
             return "I could not make the files visible."
+
+    elif any(kw in lower_text for kw in ["hide files", "hide my files", "hide this folder"]):
+        if platform.system() != "Windows":
+            return "Hiding files via attrib is only supported on Windows."
+        try:
+            # Only the sensitive runtime files — hiding the whole CWD (the old
+            # JARVIS-master "attrib +h /s /d") would hide venv and the repo.
+            logger.info("Hiding files in current directory...")
+            os.system("attrib +h notes.txt")
+            if os.path.exists("jarvis.log"):
+                os.system("attrib +h jarvis.log")
+            return "I have hidden your sensitive notes and logs."
+        except Exception as e:
+            logger.error(f"Hiding files failed: {e}")
+            return "I could not hide the files."
 
     return "Command not recognized in OS Utilities."
