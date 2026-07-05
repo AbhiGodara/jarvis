@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
 _DEFAULT_COLLECTION = "jarvis_docs"
-_PERSIST_DIR = "retrieval/chroma_db"
+# Anchored to this package so the same store is found regardless of the
+# working directory JARVIS was launched from.
+_PERSIST_DIR = str(Path(__file__).resolve().parent / "chroma_db")
 
 
 class VectorStore:

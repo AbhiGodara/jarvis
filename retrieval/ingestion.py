@@ -64,6 +64,26 @@ def _load_pdf(path: Path) -> str | None:
         return None
 
 
+def _split_oversized(para: str, chunk_size: int, overlap: int) -> list[str]:
+    """Character-window split for a paragraph larger than chunk_size.
+
+    PDF extraction often yields whole pages with no blank lines — without this
+    fallback such a page became one 4,000+ character chunk, far beyond what
+    the embedding model meaningfully encodes.
+    """
+    if len(para) <= chunk_size:
+        return [para]
+    step = max(chunk_size - overlap, 1)
+    windows = []
+    for i in range(0, len(para), step):
+        window = para[i:i + chunk_size]
+        if window.strip():
+            windows.append(window.strip())
+        if i + chunk_size >= len(para):
+            break
+    return windows
+
+
 def chunk_text(
     text: str,
     source: str,
@@ -78,7 +98,12 @@ def chunk_text(
     if not text or not text.strip():
         return []
 
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    paragraphs = [
+        piece
+        for p in text.split("\n\n")
+        if p.strip()
+        for piece in _split_oversized(p.strip(), chunk_size, overlap)
+    ]
     chunks: list[Document] = []
     current = ""
     chunk_index = 0
@@ -126,6 +151,7 @@ def ingest_directory(
     chunk_size: int = 512,
     overlap: int = 64,
     extensions: set[str] | None = None,
+    exclude_names: set[str] | None = None,
 ) -> Iterator[Document]:
     """
     Walk a directory and yield Document chunks from all supported files.
@@ -135,6 +161,7 @@ def ingest_directory(
         chunk_size: Characters per chunk
         overlap:    Overlap between adjacent chunks
         extensions: Optional whitelist of file extensions (e.g. {'.pdf', '.txt'})
+        exclude_names: Optional lowercase filenames to skip (e.g. {'readme.md'})
     """
     if not directory.exists():
         logger.warning(f"Docs directory not found: {directory}")
@@ -144,6 +171,8 @@ def ingest_directory(
         if not file_path.is_file():
             continue
         if extensions and file_path.suffix.lower() not in extensions:
+            continue
+        if exclude_names and file_path.name.lower() in exclude_names:
             continue
         chunks = ingest_file(file_path, chunk_size=chunk_size, overlap=overlap)
         if chunks:
