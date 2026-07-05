@@ -68,6 +68,7 @@ _DIRECT_LLM_STARTERS = (
 # Tool-required patterns — these SHOULD go through function calling
 _TOOL_REQUIRED_PATTERNS = (
     "weather", "temperature", "forecast", "stocks", "share price",
+    "sensex", "nifty", "stock price", "stock market", "share market",
     "calendar", "schedule", "remind me", "open ", "launch ", "play ",
     "send email", "translate", "screenshot", "search files", "read file",
     "news", "headlines", "time in", "convert ",
