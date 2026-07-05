@@ -47,6 +47,10 @@ class MCPManager:
         # Tools flagged spoken=True already return a natural spoken sentence —
         # the planner skips the synthesis LLM call for these.
         self._spoken_tools: set[str] = set()
+        # Schema-safe alias ("server__tool", what the LLM sees) → full name.
+        # An explicit map instead of str.replace("__", ".") on the way back,
+        # which corrupted tool names that legitimately contain '__'.
+        self._aliases: dict[str, str] = {}
 
     def start(self) -> None:
         """Start all MCP servers and discover their tools."""
@@ -90,6 +94,12 @@ class MCPManager:
             })
         return schemas
 
+    def _resolve(self, name: str) -> str | None:
+        """Map a dot- or double-underscore-form tool name to its full name."""
+        if name in self._tools:
+            return name
+        return self._aliases.get(name)
+
     def call(self, full_tool_name: str, arguments: dict[str, Any]) -> str:
         """
         Execute an MCP tool by its full name (e.g. 'filesystem.read_file').
@@ -97,11 +107,11 @@ class MCPManager:
         Handles both dot-separated and double-underscore-separated names
         (Gemini uses __ as separator in function names).
         """
-        normalized = full_tool_name.replace("__", ".")
-
-        tool = self._tools.get(normalized)
-        if not tool:
+        normalized = self._resolve(full_tool_name)
+        if not normalized:
             return f"[MCP Error] Unknown tool: '{full_tool_name}'. Available: {list(self._tools.keys())}"
+
+        tool = self._tools[normalized]
 
         logger.info(f"MCP call: {normalized}({arguments})")
 
@@ -140,6 +150,7 @@ class MCPManager:
                 description=tool_def.get("description", ""),
                 input_schema=tool_def.get("schema", {}),
             )
+            self._aliases[full.replace(".", "__")] = full
             fn = tool_def.get("fn")
             if fn is None:
                 logger.warning(f"Built-in tool '{full}' has no 'fn' — it will not be callable.")
@@ -150,7 +161,7 @@ class MCPManager:
 
     def has_tool(self, full_tool_name: str) -> bool:
         """True if this tool name (dot or double-underscore form) is registered."""
-        return full_tool_name.replace("__", ".") in self._tools
+        return self._resolve(full_tool_name) is not None
 
     def is_spoken_result(self, full_tool_name: str) -> bool:
         """True if this tool's output is already a spoken sentence.
@@ -158,7 +169,7 @@ class MCPManager:
         When True the planner skips the synthesis LLM call, saving ~1.5 s
         per query.  Set by register_builtin() for tools with 'spoken': True.
         """
-        return full_tool_name.replace("__", ".") in self._spoken_tools
+        return self._resolve(full_tool_name) in self._spoken_tools
 
     def is_available(self) -> bool:
         return bool(self._clients) or bool(self._tools)
@@ -186,3 +197,4 @@ class MCPManager:
                 description=t.get("description", ""),
                 input_schema=t.get("inputSchema", {}),
             )
+            self._aliases[full.replace(".", "__")] = full

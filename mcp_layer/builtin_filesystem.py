@@ -37,6 +37,11 @@ _ALLOWED_ROOTS: list[Path] = [
 
 _SENSITIVE_NAMES = {".env", "token.pickle", "credentials.json"}
 
+# Machine-generated trees that drown out real results in search_files —
+# a '*.py' search from the project root is venv noise without this.
+_SKIP_DIRS = {"venv", ".venv", ".git", "__pycache__", "node_modules",
+              "chroma_db", ".claude", ".idea", ".vscode"}
+
 
 def _is_safe_path(path: Path) -> bool:
     """Ensure path is under an allowed root (prevent path traversal attacks)."""
@@ -153,7 +158,8 @@ def search_files(pattern: str, root: str = ".") -> str:
 
     matches: list[str] = []
     try:
-        for dirpath, _, filenames in os.walk(root_path):
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_DIRS]
             for fname in filenames:
                 if fnmatch.fnmatch(fname.lower(), pattern.lower()):
                     matches.append(str(Path(dirpath) / fname))

@@ -87,6 +87,9 @@ class MCPStdioClient:
             "capabilities": {},
             "clientInfo": {"name": "jarvis", "version": "2.0"}
         })
+        # Per the MCP spec the client must confirm initialization before any
+        # other request; several servers refuse tools/list without it.
+        self._send_notification("notifications/initialized")
         logger.info(f"MCP server '{self.config.name}' started (pid={self._process.pid})")
 
     def stop(self) -> None:
@@ -98,15 +101,34 @@ class MCPStdioClient:
                 self._process.kill()
         logger.info(f"MCP server '{self.config.name}' stopped.")
 
+    def _send_notification(self, method: str, params: dict | None = None) -> None:
+        """Send a JSON-RPC notification (no id, no response expected)."""
+        if not self._process or self._process.poll() is not None:
+            return
+        message = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        with self._lock:
+            try:
+                self._process.stdin.write(json.dumps(message) + "\n")
+                self._process.stdin.flush()
+            except Exception as e:
+                logger.error(f"MCP stdio notification error: {e}")
+
     def _send_request(self, method: str, params: dict) -> dict | None:
-        """Send a JSON-RPC request and read the response."""
+        """Send a JSON-RPC request and read the matching response.
+
+        Servers may interleave notifications and log lines on stdout — only
+        the message whose id matches this request is the response; everything
+        else is skipped (previously the first line, whatever it was, was
+        returned as the answer).
+        """
         if not self._process or self._process.poll() is not None:
             logger.error(f"MCP server '{self.config.name}' is not running.")
             return None
 
+        request_id = self._next_id()
         request = {
             "jsonrpc": "2.0",
-            "id": self._next_id(),
+            "id": request_id,
             "method": method,
             "params": params
         }
@@ -119,9 +141,18 @@ class MCPStdioClient:
                 start = time.time()
                 while time.time() - start < self.config.timeout:
                     line = self._process.stdout.readline()
-                    if line:
-                        return json.loads(line.strip())
-                    time.sleep(0.05)
+                    if not line:
+                        time.sleep(0.05)
+                        continue
+                    try:
+                        message = json.loads(line.strip())
+                    except json.JSONDecodeError:
+                        logger.debug(f"MCP non-JSON line skipped: {line[:80]}")
+                        continue
+                    if message.get("id") == request_id:
+                        return message
+                    # A notification or an out-of-order response — keep reading.
+                    logger.debug(f"MCP message skipped (id != {request_id}): {line[:80]}")
 
                 logger.warning(f"MCP request timed out for '{method}'")
                 return None
