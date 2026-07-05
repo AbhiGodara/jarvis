@@ -60,7 +60,49 @@ def location_services(text: str) -> str:
             f"which is in the region of {loc_data['region']}, in {loc_data['country']}."
         )
 
-    # --- 2. Target Location Query ("where is [place]") ---
+    # --- 2. Distance Query ("how far is X" / "how far is X from Y") ---
+    # This keyword was advertised but unimplemented — every "how far" question
+    # got "Location command was not understood."
+    elif "how far is" in lower_text:
+        rest = lower_text.split("how far is", 1)[-1].strip(" ?.!,")
+        if not rest:
+            return "How far is what, sir?"
+
+        if " from " in rest:
+            place_a, place_b = (p.strip() for p in rest.split(" from ", 1))
+        else:
+            place_a, place_b = rest, None
+
+        try:
+            geolocator = Nominatim(user_agent="jarvis_assistant_geocoder")
+            loc_a = geolocator.geocode(place_a)
+            if not loc_a:
+                return f"I couldn't find a location matching {place_a}."
+            coords_a = (loc_a.latitude, loc_a.longitude)
+
+            if place_b:
+                loc_b = geolocator.geocode(place_b)
+                if not loc_b:
+                    return f"I couldn't find a location matching {place_b}."
+                coords_b = (loc_b.latitude, loc_b.longitude)
+                origin_desc = place_b
+            else:
+                curr = _get_ip_location()
+                if not curr or not curr.get("latitude"):
+                    return "I couldn't determine your current location to measure from."
+                coords_b = (curr["latitude"], curr["longitude"])
+                origin_desc = "your current location"
+
+            dist_km = great_circle(coords_b, coords_a).kilometers
+            return (
+                f"{place_a.title()} is approximately {round(dist_km)} kilometers "
+                f"from {origin_desc}."
+            )
+        except Exception as e:
+            logger.error(f"Distance lookup failed for '{rest}': {e}")
+            return f"I ran into an issue measuring the distance to {place_a}."
+
+    # --- 3. Target Location Query ("where is [place]") ---
     elif "where is" in lower_text or "locate" in lower_text:
         # Extract target place name
         place = ""

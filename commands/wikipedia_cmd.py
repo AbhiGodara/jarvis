@@ -1,4 +1,5 @@
 import logging
+import re
 import wikipedia
 from commands.registry import command
 
@@ -11,8 +12,9 @@ _LLM_ONLY_PHRASES = [
     "presently", "at the moment", "recently", "new",
 ]
 
-# Phrases to strip from the search query
-_STRIP_PHRASES = ["wikipedia", "wiki", "who is", "tell me about", "what is", "search for"]
+# Phrases to strip from the search query. Word-boundary regex: plain
+# substring replace mangled words ("wikileaks" → "leaks").
+_STRIP_RE = re.compile(r"\b(wikipedia|wiki|who is|tell me about|what is|search for)\b")
 
 
 def _should_use_llm(text: str) -> bool:
@@ -32,10 +34,8 @@ def search_wikipedia(text: str) -> str:
         logger.info(f"Wikipedia: deferring time-sensitive query to LLM: '{text}'")
         return None  # None tells the registry to fall through to LLM
 
-    # Strip trigger phrases from search query
-    query = text
-    for phrase in _STRIP_PHRASES:
-        query = query.replace(phrase, "").strip()
+    # Strip trigger phrases from search query (whole words only)
+    query = _STRIP_RE.sub(" ", text)
 
     # Clean up extra whitespace and punctuation
     query = " ".join(query.split()).strip("?!.,;: ")

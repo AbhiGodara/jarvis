@@ -51,13 +51,22 @@ def _find_ticker(text: str) -> tuple[str, str] | None:
     for name in sorted(_TICKERS, key=len, reverse=True):
         if name in text:
             return name, _TICKERS[name]
-    # Generic "Indian market" query → default to Nifty 50
-    if "india" in text and any(phrase in text for phrase in _INDIA_MARKET_WORDS):
+    # Generic market query ("how is the stock market today") → Nifty 50.
+    # Without this default such queries fell through to the LLM, which
+    # confidently invented an index level. Explicit US phrasing gets the
+    # S&P 500 instead (named US indices already matched above).
+    if any(phrase in text for phrase in _INDIA_MARKET_WORDS):
+        if any(w in text for w in ("us ", "u.s.", "american", "wall street")):
+            return "s&p 500", "^GSPC"
         return "nifty 50", "^NSEI"
     return None
 
 
-@command(keywords=["stock", "stocks", "share price", "crypto", "bitcoin", "ethereum", "price of", "trading at"])
+# "sensex"/"nifty" etc. are keywords too: "how is the sensex doing today"
+# previously matched nothing and took the direct-LLM path (hallucinated price).
+@command(keywords=["stock", "stocks", "share price", "crypto", "bitcoin", "ethereum",
+                   "price of", "trading at", "sensex", "nifty", "nasdaq", "dow jones",
+                   "stock market", "share market"])
 def get_price(text: str) -> str | None:
     """Fetch and report the current price of a stock or cryptocurrency."""
     match = _find_ticker(text)

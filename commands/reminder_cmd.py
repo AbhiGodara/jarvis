@@ -21,25 +21,26 @@ atexit.register(_cancel_all_timers)
 
 def _parse_duration(text: str) -> int | None:
     """
-    Extract a duration in seconds from text like 'in 5 minutes' or 'in 2 hours'.
+    Extract a duration in seconds from text like 'in 5 minutes', 'for 10
+    minutes', or 'after 2 hours'.
 
     Returns seconds as an integer, or None if no duration was found.
     """
-    patterns = [
-        (r"in (\d+) second", 1),
-        (r"in (\d+) minute", 60),
-        (r"in (\d+) hour", 3600),
-        (r"in a minute", None),       # Special case: 1 minute
-        (r"in an hour", None),         # Special case: 1 hour
-    ]
-    if "in a minute" in text:
+    if re.search(r"\bin (a|one) minute\b", text):
         return 60
-    if "in an hour" in text:
+    if re.search(r"\bin (an|one) hour\b", text):
         return 3600
+    if re.search(r"\bin half an hour\b", text):
+        return 1800
 
+    # "in 5 minutes" / "for 10 minutes" / "after 2 hours" — all common
+    # phrasings; the old parser only accepted "in".
+    patterns = [
+        (r"(?:in|for|after) (\d+) second", 1),
+        (r"(?:in|for|after) (\d+) minute", 60),
+        (r"(?:in|for|after) (\d+) hour", 3600),
+    ]
     for pattern, multiplier in patterns:
-        if multiplier is None:
-            continue
         match = re.search(pattern, text)
         if match:
             return int(match.group(1)) * multiplier
@@ -47,12 +48,20 @@ def _parse_duration(text: str) -> int | None:
     return None
 
 
-def _parse_message(text: str) -> str:
+def _parse_message(text: str) -> str | None:
     """Extract the reminder message from text like 'remind me in 5 minutes to check the oven'."""
     for marker in [" to ", " about "]:
         if marker in text:
-            return text.split(marker, 1)[-1].strip()
-    return "your reminder"
+            message = text.split(marker, 1)[-1].strip()
+            # "remind me to call mom in 10 minutes" — the duration trails the
+            # message; it belongs to the schedule, not the spoken reminder.
+            message = re.sub(
+                r"\s*\b(?:in|for|after)\s+(?:\d+|a|an|one|half an)\s*(?:seconds?|minutes?|hours?)\b.*$",
+                "", message,
+            ).strip(" .,!?")
+            if message:
+                return message
+    return None
 
 
 def _fire_reminder(message: str):
@@ -71,7 +80,7 @@ def set_reminder(text: str) -> str:
 
     message = _parse_message(text)
 
-    timer = threading.Timer(duration, _fire_reminder, args=[message])
+    timer = threading.Timer(duration, _fire_reminder, args=[message or "your reminder"])
     timer.daemon = True
     timer.start()
     _active_timers.append(timer)
@@ -83,4 +92,7 @@ def set_reminder(text: str) -> str:
     else:
         time_str = f"{seconds} second{'s' if seconds != 1 else ''}"
 
-    return f"Done. I'll remind you to {message} in {time_str}."
+    # No parsed message → don't say "remind you to your reminder".
+    if message:
+        return f"Done. I'll remind you to {message} in {time_str}."
+    return f"Done. I'll remind you in {time_str}."

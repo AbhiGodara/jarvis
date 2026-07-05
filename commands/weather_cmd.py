@@ -33,6 +33,16 @@ _CITY_TRIGGERS = [
 ]
 
 
+def _clean_city(city: str) -> str:
+    """Strip trailing punctuation and filler words from an extracted city."""
+    city = re.sub(r"[?!.,;:]+$", "", city).strip()
+    city = re.sub(
+        r"\b(please|now|today|tonight|tomorrow|currently|right now|outside|at the moment)\b",
+        "", city, flags=re.IGNORECASE,
+    ).strip()
+    return re.sub(r"^the\s+", "", city).strip()
+
+
 def _extract_city(text: str) -> str:
     """
     Extract a city name from the command text.
@@ -43,13 +53,20 @@ def _extract_city(text: str) -> str:
     """
     for trigger in _CITY_TRIGGERS:
         if trigger in text:
-            city = text.split(trigger, 1)[-1].strip()
-            # Strip trailing punctuation and common filler
-            city = re.sub(r"[?!.,;:]+$", "", city).strip()
-            city = re.sub(r"\b(please|now|today|currently|right now)\b", "", city, flags=re.IGNORECASE).strip()
+            city = _clean_city(text.split(trigger, 1)[-1])
             if city:
                 logger.debug(f"Extracted city: '{city}' (trigger: '{trigger}')")
                 return city
+
+    # Generic fallback: "how hot is it in jaipur", "what's the weather like in
+    # mumbai today" — phrasings where no "<keyword> in" trigger is adjacent.
+    # Take whatever follows the last in/at/for as the city candidate.
+    m = re.search(r"\b(?:in|at|for)\s+([a-z][a-z .'-]*)$", text.strip())
+    if m:
+        city = _clean_city(m.group(1))
+        if city:
+            logger.debug(f"Extracted city (fallback): '{city}'")
+            return city
 
     return _DEFAULT_CITY
 

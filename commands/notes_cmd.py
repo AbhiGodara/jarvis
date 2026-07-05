@@ -11,7 +11,8 @@ _SAVE_TRIGGERS = ["take a note", "make a note", "note that", "save a note", "add
 _READ_TRIGGERS = ["read my notes", "what are my notes", "show my notes", "list my notes"]
 
 
-@command(keywords=["take a note", "make a note", "note that", "save a note", "read my notes", "what are my notes"])
+@command(keywords=["take a note", "make a note", "note that", "save a note", "add a note",
+                   "read my notes", "what are my notes", "show my notes", "list my notes"])
 def manage_notes(text: str) -> str:
     """Save a new voice note or read existing notes back aloud."""
 
