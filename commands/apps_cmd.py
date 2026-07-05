@@ -1,5 +1,6 @@
 import re
 import logging
+import shutil
 import subprocess
 import platform
 from commands.registry import command
@@ -39,6 +40,20 @@ def open_app(text: str) -> str:
 
     try:
         if _SYSTEM == "Windows":
+            # shell=True can't report a missing program (the shell starts fine
+            # and errors silently in the background) — JARVIS used to say
+            # "Opening chrome." while nothing happened. Validate bare commands
+            # up front; "start ..." and paths are launched best-effort.
+            first = app_cmd.split()[0].lower()
+            if (
+                first not in ("start", "explorer", "cmd")
+                and "\\" not in app_cmd
+                and shutil.which(first) is None
+            ):
+                return (
+                    f"I couldn't find {text} on this system. Check the command "
+                    f"for it in the apps section of config.yaml."
+                )
             subprocess.Popen(app_cmd, shell=True)
         elif _SYSTEM == "Darwin":  # macOS
             subprocess.Popen(["open", "-a", app_cmd])

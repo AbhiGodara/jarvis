@@ -134,6 +134,9 @@ def _parse_date(text: str) -> datetime.date:
             dif += 7
             if "next" in lower_text:
                 dif += 7
+        elif dif == 0 and "next" in lower_text:
+            # "next friday" said on a Friday means a week ahead, not today
+            dif = 7
 
         return today + datetime.timedelta(dif)
 
