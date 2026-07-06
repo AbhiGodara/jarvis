@@ -32,6 +32,7 @@ import commands.registry as cmd_registry
 from agents.memory_manager import _default_manager as memory
 
 if TYPE_CHECKING:
+    from audio.sentence_stream import SpeechQueue
     from llm import LLMClient
     from mcp_layer.mcp_manager import MCPManager
     from retrieval.rag_engine import RAGEngine
@@ -114,11 +115,27 @@ class PlannerAgent:
         mcp_manager: "MCPManager | None" = None,
         rag_engine: "RAGEngine | None" = None,
         max_steps: int = 3,
+        speech_queue: "SpeechQueue | None" = None,
+        stream_min_chars: int = 25,
+        semantic_routing: bool = False,
+        semantic_route_threshold: float = 0.62,
+        semantic_tool_veto_threshold: float = 0.55,
     ):
         self.llm = llm
         self.mcp = mcp_manager
         self.rag = rag_engine
         self.max_steps = max_steps
+        # Mk-III Phase 1: when a SpeechQueue is provided, the direct-LLM and
+        # RAG tiers stream sentences to it while the answer generates. None
+        # (tts_streaming: false) keeps the Mk-II speak-after-return flow.
+        self.speech_queue = speech_queue
+        self.stream_min_chars = stream_min_chars
+        # Mk-III Phase 3: example-embedding router tier between keywords and
+        # RAG, plus a semantic veto on the direct-LLM tier. Off by default at
+        # the constructor so tests/benches opt in; main.py passes the config.
+        self.semantic_routing = semantic_routing
+        self.semantic_route_threshold = semantic_route_threshold
+        self.semantic_tool_veto_threshold = semantic_tool_veto_threshold
         # Tool schemas are static after startup — build once, not per query
         self._tool_schemas_cache: list[dict] | None = None
         logger.info("PlannerAgent initialized.")
@@ -135,6 +152,10 @@ class PlannerAgent:
         """
         t_start = time.time()
         steps: list[AgentStep] = []
+        # Per-stage latency breakdown (ms) — see AgentResult.stage_timings.
+        # Each tier records "route" when it commits, so the last write is the
+        # tier that actually handled the query.
+        timings: dict[str, float] = {}
 
         if not query or not query.strip():
             return AgentResult(
@@ -145,36 +166,107 @@ class PlannerAgent:
             )
 
         # ── Step 1: Fast keyword pre-check (no LLM cost) ──────────────────
-        local_response = cmd_registry.match(query)
-        if local_response is not None:
-            t_ms = (time.time() - t_start) * 1000
-            steps.append(AgentStep(
-                thought="Keyword match found — using local command.",
-                tool_call=ToolCall(
-                    tool_type=ToolType.LOCAL,
-                    tool_name="keyword_match",
-                    result=local_response,
-                    latency_ms=t_ms
-                ),
-                final_answer=local_response
-            ))
-            memory.add_turn("user", query)
-            memory.add_turn("assistant", local_response)
-            return AgentResult(
-                query=query,
-                response=local_response,
-                steps=steps,
-                tool_type_used=ToolType.LOCAL,
-                tool_name_used="keyword_match",
-                total_latency_ms=t_ms,
-                success=True,
-            )
+        # Match-only pre-scan so routing time and handler execution land in
+        # separate stage_timings buckets. match() below keeps sole ownership
+        # of the decline-cascade (a handler returning None continues the scan),
+        # so behavior is unchanged; the extra regex pass costs microseconds.
+        if cmd_registry.find_matching_tools(query):
+            timings["route"] = (time.time() - t_start) * 1000
+            t_exec = time.time()
+            local_response = cmd_registry.match(query)
+            if local_response is not None:
+                timings["tool_exec"] = (time.time() - t_exec) * 1000
+                timings["route_tier"] = "keyword"
+                t_ms = (time.time() - t_start) * 1000
+                steps.append(AgentStep(
+                    thought="Keyword match found — using local command.",
+                    tool_call=ToolCall(
+                        tool_type=ToolType.LOCAL,
+                        tool_name="keyword_match",
+                        result=local_response,
+                        latency_ms=t_ms
+                    ),
+                    final_answer=local_response
+                ))
+                memory.add_turn("user", query)
+                memory.add_turn("assistant", local_response)
+                return AgentResult(
+                    query=query,
+                    response=local_response,
+                    steps=steps,
+                    tool_type_used=ToolType.LOCAL,
+                    tool_name_used="keyword_match",
+                    total_latency_ms=t_ms,
+                    success=True,
+                    stage_timings=timings,
+                )
+            # Every matching handler declined — fall through to the next tier.
+
+        # ── Step 1.5: Semantic router (Mk-III Phase 3) ────────────────────
+        # One embedding of the query scores it against every command's example
+        # paraphrases; the result also powers the direct-LLM veto below. None
+        # while the embedder is still loading — routing falls through cleanly.
+        semantic: "tuple | None" = None
+        if self.semantic_routing:
+            semantic = cmd_registry.semantic_best(query)
+            if semantic is not None:
+                timings["semantic_score"] = round(semantic[1], 4)
+            if semantic is not None and semantic[1] >= self.semantic_route_threshold:
+                sem_cmd, sem_score = semantic
+                logger.info(
+                    f"Semantic match -> '{sem_cmd.handler.__name__}' "
+                    f"(score {sem_score:.2f})"
+                )
+                timings["route"] = (time.time() - t_start) * 1000
+                t_exec = time.time()
+                local_response = sem_cmd.handler(query)
+                if local_response is not None:
+                    timings["tool_exec"] = (time.time() - t_exec) * 1000
+                    timings["route_tier"] = "semantic"
+                    t_ms = (time.time() - t_start) * 1000
+                    steps.append(AgentStep(
+                        thought=(
+                            f"Semantic match ({sem_score:.2f}) — "
+                            f"using local command '{sem_cmd.handler.__name__}'."
+                        ),
+                        tool_call=ToolCall(
+                            tool_type=ToolType.LOCAL,
+                            tool_name=sem_cmd.handler.__name__,
+                            result=local_response,
+                            latency_ms=t_ms,
+                        ),
+                        final_answer=local_response,
+                    ))
+                    memory.add_turn("user", query)
+                    memory.add_turn("assistant", local_response)
+                    return AgentResult(
+                        query=query,
+                        response=local_response,
+                        steps=steps,
+                        tool_type_used=ToolType.LOCAL,
+                        tool_name_used=sem_cmd.handler.__name__,
+                        total_latency_ms=t_ms,
+                        success=True,
+                        stage_timings=timings,
+                    )
+                # Handler declined the semantic match — keep falling through.
 
         # ── Step 2: RAG check ──────────────────────────────────────────────
         if self.rag and self.rag.store.ready and self._is_rag_query(query):
             logger.info("Routing to RAG engine.")
             try:
-                answer, retrieval = self.rag.query(query)
+                timings["route"] = (time.time() - t_start) * 1000
+                t_rag = time.time()
+                if self.speech_queue is not None:
+                    stream, retrieval = self.rag.query_stream(query)
+                    answer = self._pump_stream(stream, timings)
+                    streamed = True
+                else:
+                    answer, retrieval = self.rag.query(query)
+                    streamed = False
+                # Retrieval + grounded LLM answer in one call — recorded whole.
+                timings["tool_exec"] = (time.time() - t_rag) * 1000
+                timings["route_tier"] = "rag"
                 t_ms = (time.time() - t_start) * 1000
                 steps.append(AgentStep(
                     thought=f"RAG retrieval: {len(retrieval.chunks)} chunks found.",
@@ -197,6 +289,8 @@ class PlannerAgent:
                     tool_name_used="rag_query",
                     total_latency_ms=t_ms,
                     success=True,
+                    stage_timings=timings,
+                    streamed=streamed,
                 )
             except Exception as e:
                 logger.warning(f"RAG failed: {e}. Falling through to LLM.")
@@ -208,13 +302,39 @@ class PlannerAgent:
 
         # Fast-path: if query looks like a general knowledge question and doesn't
         # need a specific tool, call LLM directly (skips one full LLM round trip)
-        if self._is_direct_llm_query(query):
+        # Semantic veto (Mk-III Phase 3): a query that LOOKS like a knowledge
+        # question but scores close to some tool's examples ("can you put on
+        # some music") belongs in the tool loop, not a chatty direct answer.
+        # This replaces the blocklist's job; _TOOL_REQUIRED_PATTERNS stays
+        # inside _is_direct_llm_query as a cheap belt-and-suspenders check.
+        semantic_veto = (
+            semantic is not None
+            and semantic[1] >= self.semantic_tool_veto_threshold
+        )
+
+        if self._is_direct_llm_query(query) and not semantic_veto:
             logger.info("Direct LLM path (no tool schema overhead)")
-            answer = self.llm.ask(
-                query,
-                memory_context=memory_context,
-                max_history_messages=_DIRECT_HISTORY_MSGS,
-            )
+            timings["route"] = (time.time() - t_start) * 1000
+            timings["route_tier"] = "direct_llm"
+            if self.speech_queue is not None:
+                answer = self._pump_stream(
+                    self.llm.ask_stream(
+                        query,
+                        memory_context=memory_context,
+                        max_history_messages=_DIRECT_HISTORY_MSGS,
+                    ),
+                    timings,
+                )
+                streamed = True
+            else:
+                t_llm = time.time()
+                answer = self.llm.ask(
+                    query,
+                    memory_context=memory_context,
+                    max_history_messages=_DIRECT_HISTORY_MSGS,
+                )
+                timings["llm_total"] = (time.time() - t_llm) * 1000
+                streamed = False
             t_ms = (time.time() - t_start) * 1000
             logger.info(f"Stage timing: direct_llm={t_ms:.0f}ms")
             steps.append(AgentStep(thought="Direct LLM answer (fast path).", final_answer=answer))
@@ -228,9 +348,20 @@ class PlannerAgent:
                 output_tokens=self.llm.last_output_tokens,
                 success=self.llm.last_error is None,
                 error=self.llm.last_error,
+                stage_timings=timings,
+                streamed=streamed,
+            )
+
+        if self._is_direct_llm_query(query) and semantic_veto:
+            logger.info(
+                f"Direct-LLM path vetoed by semantic tool match "
+                f"('{semantic[0].handler.__name__}' @ {semantic[1]:.2f}) — using tool loop."
             )
 
         all_tool_schemas = self._build_tool_schemas()
+        # The tool loop commits here; per-step schema selection is part of it.
+        timings["route"] = (time.time() - t_start) * 1000
+        timings["route_tier"] = "tool_loop"
         current_query = query
         for step_num in range(self.max_steps):
             logger.debug(f"Planner step {step_num + 1}/{self.max_steps}")
@@ -251,6 +382,7 @@ class PlannerAgent:
                 max_history_messages=_PLAN_HISTORY_MSGS,
             )
             plan_ms = (time.time() - t_plan) * 1000
+            timings["llm_total"] = timings.get("llm_total", 0.0) + plan_ms
 
             # Direct LLM answer (no tool needed)
             if isinstance(plan, str):
@@ -272,6 +404,7 @@ class PlannerAgent:
                     output_tokens=self.llm.last_output_tokens,
                     success=self.llm.last_error is None,
                     error=self.llm.last_error,
+                    stage_timings=timings,
                 )
 
             # Tool call decision
@@ -281,6 +414,7 @@ class PlannerAgent:
             t_tool = time.time()
             tool_result, tool_type = self._execute_tool(tool_name, tool_args, current_query)
             tool_latency_ms = (time.time() - t_tool) * 1000
+            timings["tool_exec"] = timings.get("tool_exec", 0.0) + tool_latency_ms
 
             steps.append(AgentStep(
                 thought=f"LLM chose tool '{tool_name}' with args {tool_args}.",
@@ -330,6 +464,8 @@ class PlannerAgent:
                         synthesis_prompt, memory_context=memory_context, skip_history=True
                     )
                     synth_ms = (time.time() - t_synth) * 1000
+                    timings["synthesis"] = synth_ms
+                    timings["llm_total"] = timings.get("llm_total", 0.0) + synth_ms
                     logger.info(
                         f"Stage timing: plan={plan_ms:.0f}ms "
                         f"tool={tool_latency_ms:.0f}ms synth={synth_ms:.0f}ms"
@@ -364,6 +500,7 @@ class PlannerAgent:
                     # raw output, so the run still served the user.
                     success=True,
                     error=synthesis_error,
+                    stage_timings=timings,
                 )
 
             # Tool failed — inject failure context and retry
@@ -376,11 +513,13 @@ class PlannerAgent:
 
         # ── Fallback: pure LLM after max steps ────────────────────────────
         logger.info("Max planning steps reached. Falling back to pure LLM.")
+        t_llm = time.time()
         answer = self.llm.ask(
             current_query,
             memory_context=memory_context,
             max_history_messages=_DIRECT_HISTORY_MSGS,
         )
+        timings["llm_total"] = timings.get("llm_total", 0.0) + (time.time() - t_llm) * 1000
         t_ms = (time.time() - t_start) * 1000
         memory.add_turn("user", query)
         memory.add_turn("assistant", answer)
@@ -395,9 +534,34 @@ class PlannerAgent:
             output_tokens=self.llm.last_output_tokens,
             success=self.llm.last_error is None,
             error=self.llm.last_error,
+            stage_timings=timings,
         )
 
     # ── Private helpers ────────────────────────────────────────────────────
+
+    def _pump_stream(self, deltas, timings: dict[str, float]) -> str:
+        """Feed streamed answer deltas through the sentence chunker into the
+        speech queue (speech starts while the rest still generates), returning
+        the assembled full text for the AgentResult/history.
+        """
+        from audio.sentence_stream import SentenceChunker
+
+        chunker = SentenceChunker(min_chars=self.stream_min_chars)
+        self.speech_queue.begin_turn()
+        parts: list[str] = []
+        t0 = time.time()
+        got_first_token = False
+        for delta in deltas:
+            if not got_first_token:
+                got_first_token = True
+                timings["llm_first_token"] = (time.time() - t0) * 1000
+            parts.append(delta)
+            for sentence in chunker.feed(delta):
+                self.speech_queue.put(sentence)
+        for sentence in chunker.flush():
+            self.speech_queue.put(sentence)
+        timings["llm_total"] = timings.get("llm_total", 0.0) + (time.time() - t0) * 1000
+        return "".join(parts).strip()
 
     @staticmethod
     def _is_error_result(result: str) -> bool:
