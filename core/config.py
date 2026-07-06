@@ -33,10 +33,22 @@ class Config:
     mic_device_index: int | None = None
 
     # STT
-    stt_backend: str = "openai"
+    # Mk-III Phase 2 backends: "race" (OpenAI + local concurrently, best of
+    # both), "local" (faster-whisper only, fully offline), "openai" (Mk-II
+    # rollback).
+    stt_backend: str = "race"
     stt_openai_model: str = "whisper-1"
     stt_timeout: int = 8
     stt_phrase_limit: int = 15
+    # Mk-III Phase 2: local faster-whisper model size (tiny/base/small/medium).
+    stt_local_model: str = "small"
+    # Race mode: after the local result is ready, wait this long for OpenAI's
+    # (usually more accurate) result before going with local.
+    stt_race_grace_ms: int = 900
+    # Mk-III Phase 2: silence that ends a recording (was a hardcoded 1.2 s).
+    # Utterances under 0.8 s of voiced audio get one +0.4 s extension so slow
+    # starters aren't clipped.
+    stt_endpoint_silence_secs: float = 0.7
 
     # TTS
     tts_engine: str = "openai"
@@ -50,6 +62,13 @@ class Config:
     # From India, OpenAI audio endpoint sometimes takes 20+ s — set low to
     # prevent JARVIS from going silent mid-conversation.
     tts_openai_timeout: int = 7
+
+    # Mk-III Phase 1: sentence-streamed TTS. JARVIS starts speaking after the
+    # first sentence of an LLM answer exists, while the rest still generates.
+    # false = Mk-II behavior (generate the full answer, then speak it).
+    tts_streaming: bool = True
+    # Sentences shorter than this merge into the next one before being spoken.
+    tts_stream_min_sentence_chars: int = 25
 
     # LLM
     # environment: "development" = Gemini only (preserve OpenAI credits),
@@ -100,6 +119,14 @@ class Config:
 
     # Agent
     agent_max_steps: int = 5
+
+    # Mk-III Phase 3: semantic router tier. Paraphrases route to commands by
+    # example-embedding similarity; false = Mk-II keyword-only routing.
+    semantic_routing: bool = True
+    # Best example score needed to route a query to that command.
+    semantic_route_threshold: float = 0.62
+    # Best score against ANY tool that vetoes the direct-LLM fast path.
+    semantic_tool_veto_threshold: float = 0.55
 
     # Conversation mode: seconds to wait for a follow-up after responding,
     # before falling back to wake-word mode. Set to 0 to disable.

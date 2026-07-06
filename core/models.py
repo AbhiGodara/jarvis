@@ -40,7 +40,27 @@ class AgentStep:
 
 @dataclass
 class AgentResult:
-    """The complete output of one agent run (one user command)."""
+    """The complete output of one agent run (one user command).
+
+    stage_timings: per-stage latency breakdown in milliseconds (Mk-III
+    Phase 0). Keys, recorded wherever the stage occurs:
+      vad_endpoint    end of speech → recording stopped (stt.py)
+      stt             transcription time (stt.py)
+      stt_engine      which engine's transcript won: "openai" | "local"
+                      (a string; Phase 2)
+      route           run() entry → the handling tier starts (planner)
+      route_tier      which tier answered: "keyword" | "semantic" | "rag" |
+                      "direct_llm" | "tool_loop" (a string; Phase 3)
+      semantic_score  best example-similarity score for the query (Phase 3;
+                      present whenever the semantic router ran)
+      llm_first_token first streamed token (Phase 1+; absent before streaming)
+      llm_total       cumulative LLM time: plan + direct + synthesis (planner)
+      tool_exec       tool/handler execution, incl. RAG query (planner)
+      synthesis       the synthesis LLM call alone, also in llm_total (planner)
+      tts_first_byte  speak() start → first PCM block written (tts.py)
+      tts_total       full speech duration (tts.py)
+      ttfa            end of speech → first PCM block written (main.py)
+    """
     query: str
     response: str
     steps: list[AgentStep] = field(default_factory=list)
@@ -52,6 +72,11 @@ class AgentResult:
     success: bool = True
     error: str | None = None
     timestamp: float = field(default_factory=time.time)
+    stage_timings: dict[str, float | str] = field(default_factory=dict)
+    # True when the answer was sentence-streamed to the SpeechQueue during the
+    # run (Mk-III Phase 1) — main.py then waits for the queue instead of
+    # speaking response itself.
+    streamed: bool = False
 
 
 @dataclass
