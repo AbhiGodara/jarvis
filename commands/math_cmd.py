@@ -47,7 +47,14 @@ _NON_MATH_PHRASES = [
 
 @command(
     keywords=["calculate", "what is ", "how much is", "convert ", "times", "divided by", "percent of"],
-    description="Evaluate math expressions, unit conversions, and calculations"
+    description="Evaluate math expressions, unit conversions, and calculations",
+    examples=[
+        "what is 45 times 12",
+        "calculate 15 percent of 200",
+        "convert 10 kilometers to miles",
+        "how much is 250 divided by 5",
+        "what's 2 to the power of 10",
+    ],
 )
 def calculate(text: str) -> str:
     """Evaluate maths expressions and perform unit conversions."""

@@ -20,7 +20,16 @@ def _extract_app_name(text: str) -> str:
     return " ".join(_TRIGGER_RE.sub(" ", text).split())
 
 
-@command(keywords=["open ", "launch ", "start ", "run "])
+@command(
+    keywords=["open ", "launch ", "start ", "run "],
+    examples=[
+        "open chrome for me",
+        "launch the calculator",
+        "fire up spotify",
+        "start notepad",
+        "bring up the file explorer",
+    ],
+)
 def open_app(text: str) -> str:
     """Open an application or file by voice command."""
     text = _extract_app_name(text)

@@ -37,7 +37,14 @@ def _extract_phrase(text: str, lang_name: str) -> str:
 
 
 @command(keywords=["translate", "how do you say", "in spanish", "in hindi", "in french",
-                   "in arabic", "in german", "in japanese", "in chinese", "in russian"])
+                   "in arabic", "in german", "in japanese", "in chinese", "in russian"],
+         examples=[
+             "how do you say hello in spanish",
+             "translate good morning to hindi",
+             "what's thank you in french",
+             "say i love you in japanese",
+             "what would namaste be in english",
+         ])
 def translate(text: str) -> str:
     """Translate a phrase to another language using Google Translate."""
     lang_match = _find_language(text)

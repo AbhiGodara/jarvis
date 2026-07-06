@@ -42,7 +42,16 @@ def _get_input(prompt_msg: str) -> str | None:
     return response if response else None
 
 
-@command(keywords=["send email", "send an email", "send a mail", "send mail", "write an email", "compose an email"])
+@command(
+    keywords=["send email", "send an email", "send a mail", "send mail", "write an email", "compose an email"],
+    examples=[
+        "send an email to my assistant",
+        "compose a mail for me",
+        "i need to email someone",
+        "shoot an email to john",
+        "draft an email about the meeting",
+    ],
+)
 def send_email_cmd(text: str) -> str:
     """Send an email dynamically by looking up contacts and prompting for content."""
     

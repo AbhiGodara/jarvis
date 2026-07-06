@@ -14,9 +14,11 @@ import importlib
 import logging
 import pkgutil
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +32,19 @@ class _Command:
     description: str
     priority: int = 0       # higher wins when several commands match
     order: int = 0          # registration order (stable tie-break)
+    # Natural paraphrases for the semantic router (Mk-III Phase 3) — queries
+    # that SHOULD reach this command even though no keyword matches.
+    examples: list[str] = field(default_factory=list)
 
 
 _registry: list[_Command] = []
 
 # Tool schema for Gemini function calling
 _tool_schemas: list[dict] = []
+
+# Semantic example index: (normalized embedding matrix [N, d], owner per row).
+# Built lazily on the first semantic_best() call once the embedder is up.
+_semantic_index: tuple[np.ndarray, list[_Command]] | None = None
 
 
 def _compile_keyword(kw: str) -> re.Pattern:
@@ -51,7 +60,12 @@ def _compile_keyword(kw: str) -> re.Pattern:
     return re.compile(r"(?<!\w)" + re.escape(kw) + r"(?!\w)")
 
 
-def command(keywords: list[str], description: str = "", priority: int = 0):
+def command(
+    keywords: list[str],
+    description: str = "",
+    priority: int = 0,
+    examples: list[str] | None = None,
+):
     """
     Decorator to register a voice command handler.
 
@@ -63,6 +77,9 @@ def command(keywords: list[str], description: str = "", priority: int = 0):
                      Use a positive priority for commands whose keywords are
                      specific ("youtube", "temperature in") so they beat
                      generic verbs like "open " or "what is ".
+        examples:    4-8 natural paraphrases for the semantic router (Mk-III
+                     Phase 3) — how users actually phrase this request when no
+                     keyword matches ("do i need an umbrella" → weather).
 
     Example:
         @command(keywords=["weather", "temperature"], description="Get current weather")
@@ -79,6 +96,7 @@ def command(keywords: list[str], description: str = "", priority: int = 0):
             description=desc,
             priority=priority,
             order=len(_registry),
+            examples=[e.lower() for e in (examples or [])],
         ))
         _tool_schemas.append({
             "name": fn.__name__,
@@ -128,6 +146,69 @@ def find_matching_tools(text: str) -> list[str]:
         for cmd in _scan_order()
         if any(p.search(lower) for p in cmd.patterns)
     ]
+
+
+def _ensure_semantic_index() -> tuple[np.ndarray, list[_Command]] | None:
+    """Build (once) the example-embedding matrix. None while the embedder is
+    still loading — the next query simply retries."""
+    global _semantic_index
+    if _semantic_index is not None:
+        return _semantic_index
+
+    texts: list[str] = []
+    owners: list[_Command] = []
+    for cmd in _registry:
+        for example in cmd.examples:
+            texts.append(example)
+            owners.append(cmd)
+    if not texts:
+        return None
+
+    from core import embedder
+    matrix = embedder.encode_if_ready(texts)
+    if matrix is None:
+        return None
+
+    _semantic_index = (matrix, owners)
+    logger.info(
+        f"Semantic router index built: {len(texts)} examples across "
+        f"{len({c.handler.__name__ for c in owners})} commands."
+    )
+    return _semantic_index
+
+
+def semantic_best(query: str) -> tuple[_Command, float] | None:
+    """Best-scoring command by example similarity (Mk-III Phase 3).
+
+    Returns (command, cosine_score) regardless of threshold, or None when the
+    semantic index isn't available (embedder still loading, no examples).
+    Embeddings are L2-normalized, so cosine similarity is a dot product.
+    """
+    index = _ensure_semantic_index()
+    if index is None:
+        return None
+    from core import embedder
+    query_vec = embedder.encode_if_ready([query.lower()])
+    if query_vec is None:
+        return None
+    matrix, owners = index
+    scores = matrix @ query_vec[0]
+    best = int(np.argmax(scores))
+    return owners[best], float(scores[best])
+
+
+def semantic_match(query: str, threshold: float = 0.62) -> tuple[_Command, float] | None:
+    """semantic_best() gated by the routing threshold."""
+    best = semantic_best(query)
+    if best is not None and best[1] >= threshold:
+        return best
+    return None
+
+
+def reset_semantic_index() -> None:
+    """Drop the cached example matrix (tests that register extra commands)."""
+    global _semantic_index
+    _semantic_index = None
 
 
 def dispatch(tool_name: str, text: str) -> str | None:

@@ -23,9 +23,19 @@ def _should_use_llm(text: str) -> bool:
     return any(phrase in lower for phrase in _LLM_ONLY_PHRASES)
 
 
+# Examples are deliberately wikipedia-flavored lookups, NOT generic "who is X"
+# phrasings — plain knowledge questions ("who is virat kohli") must stay on
+# the direct-LLM tier, and generic examples here would semantically veto them.
 @command(
     keywords=["wikipedia", "wiki", "who is", "tell me about"],
-    description="Search Wikipedia for information about a topic or person"
+    description="Search Wikipedia for information about a topic or person",
+    examples=[
+        "look up nikola tesla on wikipedia",
+        "search wikipedia for the eiffel tower",
+        "give me the wikipedia summary of the taj mahal",
+        "wiki the french revolution",
+        "find the wikipedia page about black holes",
+    ],
 )
 def search_wikipedia(text: str) -> str:
     """Search Wikipedia for a topic and return a brief spoken summary."""

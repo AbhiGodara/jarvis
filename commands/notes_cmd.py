@@ -12,7 +12,15 @@ _READ_TRIGGERS = ["read my notes", "what are my notes", "show my notes", "list m
 
 
 @command(keywords=["take a note", "make a note", "note that", "save a note", "add a note",
-                   "read my notes", "what are my notes", "show my notes", "list my notes"])
+                   "read my notes", "what are my notes", "show my notes", "list my notes"],
+         examples=[
+             "jot this down",
+             "write down that i parked on level 3",
+             "jot down milk and eggs for tomorrow",
+             "what are my saved notes",
+             "read back my notes",
+             "make a note of this",
+         ])
 def manage_notes(text: str) -> str:
     """Save a new voice note or read existing notes back aloud."""
 

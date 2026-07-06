@@ -77,6 +77,14 @@ def _extract_city(text: str) -> str:
     keywords=["weather", "temperature", "forecast", "how hot", "how cold", "is it raining", "is it sunny"],
     description="Get current weather conditions for a city",
     priority=5,
+    examples=[
+        "what's it like outside",
+        "do i need an umbrella today",
+        "is it going to rain today",
+        "how hot is it in delhi",
+        "will i need a jacket this evening",
+        "what's the temperature right now",
+    ],
 )
 def get_weather(text: str) -> str:
     """Fetch current weather conditions for a city from OpenWeatherMap."""

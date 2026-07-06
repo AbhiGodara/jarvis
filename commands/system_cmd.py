@@ -17,7 +17,16 @@ def _convert_size(size_bytes: int) -> str:
     return f"{s} {size_name[i]}"
 
 
-@command(keywords=["system stats", "cpu usage", "ram usage", "battery level", "system status"])
+@command(
+    keywords=["system stats", "cpu usage", "ram usage", "battery level", "system status"],
+    examples=[
+        "how much juice is left in my laptop",
+        "what's my battery percentage",
+        "how much ram am i using",
+        "is the cpu under heavy load",
+        "how's the computer doing on resources",
+    ],
+)
 def get_system_stats(text: str) -> str:
     """Retrieve CPU utilization, memory usage, and battery statistics."""
     try:

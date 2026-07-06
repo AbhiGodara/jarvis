@@ -149,7 +149,16 @@ def _parse_date(text: str) -> datetime.date:
     return today
 
 
-@command(keywords=["what do i have", "do i have plans", "am i busy", "google calendar", "calendar events", "schedule on"])
+@command(
+    keywords=["what do i have", "do i have plans", "am i busy", "google calendar", "calendar events", "schedule on"],
+    examples=[
+        "what do i have planned for today",
+        "am i busy tomorrow",
+        "what's on my calendar for friday",
+        "do i have any meetings today",
+        "check my schedule for next monday",
+    ],
+)
 def check_google_calendar(text: str) -> str:
     """List Google Calendar events for a specific day."""
     service, err_msg = _authenticate_google()

@@ -66,7 +66,16 @@ def _find_ticker(text: str) -> tuple[str, str] | None:
 # previously matched nothing and took the direct-LLM path (hallucinated price).
 @command(keywords=["stock", "stocks", "share price", "crypto", "bitcoin", "ethereum",
                    "price of", "trading at", "sensex", "nifty", "nasdaq", "dow jones",
-                   "stock market", "share market"])
+                   "stock market", "share market"],
+         examples=[
+             "how is the market doing today",
+             "what's the nifty at right now",
+             "check the price of bitcoin",
+             "what's bitcoin trading at today",
+             "how are my tesla shares doing",
+             "what's reliance trading at",
+             "is the sensex up or down today",
+         ])
 def get_price(text: str) -> str | None:
     """Fetch and report the current price of a stock or cryptocurrency."""
     match = _find_ticker(text)

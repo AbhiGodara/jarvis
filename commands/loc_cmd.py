@@ -44,7 +44,16 @@ def _get_ip_location() -> dict:
         return {}
 
 
-@command(keywords=["where is", "how far is", "current location", "where am i", "locate"])
+@command(
+    keywords=["where is", "how far is", "current location", "where am i", "locate"],
+    examples=[
+        "where am i right now",
+        "what's my current location",
+        "how far is jaipur from delhi",
+        "show me mumbai on the map",
+        "what city am i in",
+    ],
+)
 def location_services(text: str) -> str:
     """Handle geolocation, distance calculations, and open map locations."""
     lower_text = text.lower()

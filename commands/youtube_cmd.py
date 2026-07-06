@@ -21,7 +21,18 @@ def _extract_query(text: str) -> str:
 
 # priority=5: "open youtube and play believer" must come here, not to
 # open_app — 'youtube'/'play' are more specific than the generic 'open '.
-@command(keywords=["play ", "youtube", "put on", "i want to listen to"], priority=5)
+@command(
+    keywords=["play ", "youtube", "put on", "i want to listen to"],
+    priority=5,
+    examples=[
+        "play some music",
+        "put on a song for me",
+        "i want to watch a video",
+        "put on some lofi beats",
+        "play believer by imagine dragons",
+        "open youtube",
+    ],
+)
 def play_youtube(text: str) -> str:
     """Open or search YouTube based on the user's command."""
     query_text = _extract_query(text)

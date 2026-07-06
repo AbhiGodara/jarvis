@@ -71,7 +71,16 @@ def _fire_reminder(message: str):
     speak(f"Reminder: {message}")
 
 
-@command(keywords=["remind me", "set a reminder", "reminder"])
+@command(
+    keywords=["remind me", "set a reminder", "reminder"],
+    examples=[
+        "remind me in 10 minutes to check the oven",
+        "set a reminder for my meeting",
+        "ping me in 5 minutes",
+        "don't let me forget to call mom",
+        "give me a nudge in half an hour",
+    ],
+)
 def set_reminder(text: str) -> str:
     """Parse a reminder command and schedule a voice alert using a background timer."""
     duration = _parse_duration(text)

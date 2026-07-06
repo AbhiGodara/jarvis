@@ -12,7 +12,14 @@ logger = logging.getLogger(__name__)
 # NOTE: no "show files"/"list files" keyword here — those are directory-listing
 # requests owned by the filesystem MCP tools via the planner. This command only
 # toggles the hidden attribute on notes/logs.
-@command(keywords=["screenshot", "capture the screen", "capture screen", "switch window", "switch the window", "hide files", "hide my files", "unhide files", "make files visible", "show hidden files"])
+@command(keywords=["screenshot", "capture the screen", "capture screen", "switch window", "switch the window", "hide files", "hide my files", "unhide files", "make files visible", "show hidden files"],
+         examples=[
+             "take a screenshot",
+             "grab a picture of my screen",
+             "switch to the other window",
+             "hide my private files",
+             "make my hidden files visible again",
+         ])
 def os_utilities(text: str) -> str:
     """Handle desktop utilities like screenshot, window switching, and file visibility."""
     lower_text = text.lower()

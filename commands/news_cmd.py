@@ -97,7 +97,17 @@ def _fetch_rss(topic: str, limit: int) -> list[str]:
     return []
 
 
-@command(keywords=["news", "headlines", "what's happening", "what happened today", "top stories"])
+@command(
+    keywords=["news", "headlines", "what's happening", "what happened today", "top stories"],
+    examples=[
+        "what's happening in the world",
+        "read me the headlines",
+        "any news today",
+        "catch me up on current events",
+        "latest cricket updates",
+        "what's going on in india",
+    ],
+)
 def get_news(text: str) -> str:
     """Fetch and read the top news headlines aloud."""
     topic = _detect_topic(text)
