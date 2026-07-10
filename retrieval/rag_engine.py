@@ -59,17 +59,20 @@ class RAGEngine:
         self.top_k = top_k
         self.min_score = min_score
 
-    def query(self, question: str) -> tuple[str, RetrievalResult]:
-        """
-        Answer a question using retrieved documents.
+    def _prepare(self, question: str):
+        """Shared retrieval/guard step for query() and query_stream().
 
-        Returns:
-            (answer_text, retrieval_result)
+        Returns (early_answer, retrieval, grounded_prompt, source_note) —
+        early_answer is a ready-to-speak message when retrieval can't help
+        (store not ready, nothing relevant), in which case the prompt/note
+        are None.
         """
         if not self.store.ready:
             return (
                 "The document store is not ready. Place documents in the docs/ folder and restart.",
-                RetrievalResult(question, [], [])
+                RetrievalResult(question, [], []),
+                None,
+                None,
             )
 
         retrieval = self.store.search(question, top_k=self.top_k)
@@ -84,7 +87,9 @@ class RAGEngine:
             return (
                 "I searched the document store but couldn't find relevant information. "
                 "Try asking me directly without the document reference.",
-                retrieval
+                retrieval,
+                None,
+                None,
             )
 
         context_parts = []
@@ -99,16 +104,50 @@ class RAGEngine:
             f"DOCUMENTS:\n{context}"
         )
 
+        sources = list(dict.fromkeys(c.source for c, _ in good_chunks))
+        source_note = f" Source{'s' if len(sources) > 1 else ''}: {', '.join(sources)}."
+
+        return None, retrieval, grounded_prompt, source_note
+
+    def query(self, question: str) -> tuple[str, RetrievalResult]:
+        """
+        Answer a question using retrieved documents.
+
+        Returns:
+            (answer_text, retrieval_result)
+        """
+        early_answer, retrieval, grounded_prompt, source_note = self._prepare(question)
+        if early_answer is not None:
+            return early_answer, retrieval
+
         answer = self.llm.ask(
             grounded_prompt,
             memory_context=_RAG_SYSTEM_PROMPT,
             skip_history=True,   # RAG answers don't pollute conversation history
         )
 
-        sources = list(dict.fromkeys(c.source for c, _ in good_chunks))
-        source_note = f" Source{'s' if len(sources) > 1 else ''}: {', '.join(sources)}."
-
         return answer + source_note, retrieval
+
+    def query_stream(self, question: str):
+        """Streaming variant of query() (Mk-III Phase 1).
+
+        Returns (delta_iterator, retrieval_result). The iterator yields the
+        grounded answer as text deltas with the source note as the final
+        delta; guard failures yield their message as a single delta.
+        """
+        early_answer, retrieval, grounded_prompt, source_note = self._prepare(question)
+        if early_answer is not None:
+            return iter([early_answer]), retrieval
+
+        def _gen():
+            yield from self.llm.ask_stream(
+                grounded_prompt,
+                memory_context=_RAG_SYSTEM_PROMPT,
+                skip_history=True,
+            )
+            yield source_note
+
+        return _gen(), retrieval
 
     def ingest_and_index(self, docs_dir: str = "docs") -> dict:
         """
@@ -120,11 +159,12 @@ class RAGEngine:
 
         directory = Path(docs_dir)
         chunks = list(ingest_directory(directory))
-        added = self.store.add(chunks)
+        result = self.store.sync(chunks)
 
         stats = {
             "total_chunks": len(chunks),
-            "new_chunks_added": added,
+            "new_chunks_added": result["added"],
+            "stale_chunks_removed": result["deleted"],
             "total_in_store": self.store.count(),
             "sources": self.store.list_sources(),
         }

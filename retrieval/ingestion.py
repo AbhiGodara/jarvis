@@ -21,10 +21,24 @@ from core.models import Document
 logger = logging.getLogger(__name__)
 
 
-def _hash_id(source: str, chunk_index: int) -> str:
-    """Generate a stable, unique ID for a document chunk."""
-    raw = f"{source}::{chunk_index}"
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+def _hash_id(source: str, chunk_content: str) -> str:
+    """Content-addressed chunk ID (Mk-III Phase 7).
+
+    md5(source :: md5(chunk_text))[:16] — re-ingesting an unchanged file
+    reproduces identical IDs (idempotent), while an edited chunk gets a new
+    one. Old-format IDs were 12 chars of md5(source::index): editing a file
+    in place could leave orphaned stale chunks behind. 16 chars also lets
+    sync logic tell the two generations apart.
+    """
+    content_digest = hashlib.md5(chunk_content.encode()).hexdigest()
+    raw = f"{source}::{content_digest}"
+    return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
+def file_content_hash(text: str) -> str:
+    """Whole-file digest stored in every chunk's metadata — the change
+    detector VectorStore.sync_source() compares against."""
+    return hashlib.md5(text.encode()).hexdigest()
 
 
 def load_text(path: Path) -> str | None:
@@ -98,6 +112,10 @@ def chunk_text(
     if not text or not text.strip():
         return []
 
+    # One whole-file digest, stamped into every chunk's metadata so
+    # VectorStore.sync_source() can tell in O(1) whether the file changed.
+    whole_hash = file_content_hash(text)
+
     paragraphs = [
         piece
         for p in text.split("\n\n")
@@ -114,11 +132,12 @@ def chunk_text(
         else:
             if current:
                 chunks.append(Document(
-                    doc_id=_hash_id(source, chunk_index),
+                    doc_id=_hash_id(source, current),
                     source=source,
                     chunk_index=chunk_index,
                     content=current,
-                    metadata={"source": source, "chunk": chunk_index}
+                    metadata={"source": source, "chunk": chunk_index,
+                              "content_hash": whole_hash}
                 ))
                 chunk_index += 1
                 current = current[-overlap:].strip() + "\n\n" + para
@@ -127,11 +146,12 @@ def chunk_text(
 
     if current:
         chunks.append(Document(
-            doc_id=_hash_id(source, chunk_index),
+            doc_id=_hash_id(source, current),
             source=source,
             chunk_index=chunk_index,
             content=current,
-            metadata={"source": source, "chunk": chunk_index}
+            metadata={"source": source, "chunk": chunk_index,
+                      "content_hash": whole_hash}
         ))
 
     logger.debug(f"Chunked '{source}' → {len(chunks)} chunks")
