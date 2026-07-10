@@ -36,15 +36,41 @@ def load_model(model_name: str = "hey_jarvis"):
     """
     from openwakeword.model import Model
     logger.info(f"Loading wake word model: {model_name} (once at startup)")
-    oww = Model(
-        wakeword_models=[model_name],
-        inference_framework="onnx"
-    )
+
+    def _build():
+        return Model(wakeword_models=[model_name], inference_framework="onnx")
+
+    try:
+        oww = _build()
+    except Exception as e:
+        # The openwakeword pip package ships WITHOUT the pretrained .onnx
+        # weights — a fresh environment raises onnxruntime NoSuchFile here.
+        # Download them once (also fetches the melspectrogram/embedding
+        # feature models the detector needs) and retry.
+        msg = str(e).lower()
+        if not ("no_suchfile" in msg or "no such file" in msg or "doesn't exist" in msg):
+            raise
+        logger.info("Wake word model files missing — downloading pretrained models (one-time)...")
+        import openwakeword.utils
+        openwakeword.utils.download_models()
+        oww = _build()
+
     logger.info("Wake word model loaded successfully.")
     return oww
 
 
-def wait_for_wake_word(oww=None, model_name: str = "hey_jarvis") -> None:
+def _drain(q: queue.Queue) -> None:
+    """Discard everything queued so detection starts on live audio."""
+    try:
+        while True:
+            q.get_nowait()
+    except queue.Empty:
+        pass
+
+
+def wait_for_wake_word(
+    oww=None, model_name: str = "hey_jarvis", frame_queue: queue.Queue | None = None
+) -> None:
     """
     Block until the wake word is detected in the microphone stream.
 
@@ -52,6 +78,8 @@ def wait_for_wake_word(oww=None, model_name: str = "hey_jarvis") -> None:
         oww: Pre-loaded OpenWakeWord model (from load_model()). If None,
              the model is loaded on the spot (slower, backward-compatible).
         model_name: The wake word name to detect.
+        frame_queue: AudioBus consumer queue (Mk-III Phase 5, barge_in mode).
+             None = open a private InputStream (Mk-II rollback path).
     """
     if oww is None:
         oww = load_model(model_name)
@@ -63,14 +91,26 @@ def wait_for_wake_word(oww=None, model_name: str = "hey_jarvis") -> None:
     except Exception:
         pass
 
+    logger.info(f"Idle — waiting for wake word '{model_name}'...")
+
+    if frame_queue is not None:
+        # Frames accumulated while we weren't idle (JARVIS speaking, STT
+        # recording) are history, not commands — start fresh.
+        _drain(frame_queue)
+        while True:
+            audio_data = frame_queue.get().flatten()
+            predictions = oww.predict(audio_data)
+            score = predictions.get(model_name, 0.0)
+            if score >= ACTIVATION_THRESHOLD:
+                logger.info(f"Wake word detected! Confidence={score:.3f}")
+                return
+
     q: queue.Queue = queue.Queue()
 
     def audio_callback(indata, frames, time_info, status):
         if status:
             logger.warning(f"Microphone status: {status}")
         q.put(indata.copy())
-
-    logger.info(f"Idle — waiting for wake word '{model_name}'...")
 
     with sd.InputStream(
         device=MIC_INDEX,
