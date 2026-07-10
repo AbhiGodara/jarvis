@@ -20,9 +20,16 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from .base import AllProvidersFailedError, LLMProvider, ProviderError, ProviderResponse
+from .base import (
+    AllProvidersFailedError,
+    LLMProvider,
+    ProviderError,
+    ProviderResponse,
+    StreamInterruptedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +108,79 @@ class ProviderManager:
 
         raise AllProvidersFailedError(errors)
 
+    def generate_stream(
+        self,
+        system: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+    ) -> Iterator[str]:
+        """Stream an answer as text deltas (Mk-III Phase 1). Text-only.
+
+        Failover rules:
+          - Before the first token: identical pass structure to generate()
+            (healthy providers → cooling-down providers → one paced retry
+            for transient failures).
+          - After the first token: the provider owns the answer. On error the
+            stream stops and StreamInterruptedError carries the partial text —
+            never a silent mid-answer provider switch (the voice would
+            audibly change register and content).
+        """
+        errors: dict[str, ProviderError] = {}
+        request = dict(system=system, messages=messages, temperature=temperature)
+
+        for pass_num in range(3):
+            if pass_num == 0:
+                now = time.time()
+                candidates = [s for s in self._states if s.cooldown_until <= now]
+            elif pass_num == 1:
+                candidates = [s for s in self._states if s.provider.name not in errors]
+            else:
+                retryable = {n for n, e in errors.items() if e.transient and not e.quota}
+                if not retryable:
+                    break
+                time.sleep(self._retry_pause_s)
+                candidates = [s for s in self._states if s.provider.name in retryable]
+
+            for state in candidates:
+                name = state.provider.name
+                emitted_any = False
+                partial: list[str] = []
+                try:
+                    for delta in state.provider.generate_stream(**request):
+                        if not emitted_any:
+                            emitted_any = True
+                            self._note_success(state, errors)
+                        partial.append(delta)
+                        yield delta
+                    if not emitted_any:
+                        # Clean end with zero tokens = an empty answer (the
+                        # generate() equivalent of text=None). Still this
+                        # provider's answer — don't fail over.
+                        self._note_success(state, errors)
+                    return
+                except ProviderError as e:
+                    self._apply_cooldown(state, e)
+                    if emitted_any:
+                        raise StreamInterruptedError("".join(partial), e) from e
+                    errors[name] = e
+                    logger.warning(
+                        f"Provider '{name}' failed before first token "
+                        f"({'quota' if e.quota else 'transient' if e.transient else 'hard'}): "
+                        f"{str(e)[:140]} — failing over."
+                    )
+
+        raise AllProvidersFailedError(errors)
+
+    def _note_success(self, state: _ProviderState, errors: dict[str, ProviderError]) -> None:
+        """Mark a provider healthy and current after it starts answering."""
+        name = state.provider.name
+        state.failures = 0
+        state.cooldown_until = 0.0
+        errors.pop(name, None)
+        if self.last_provider != name:
+            logger.info(f"LLM provider in use: {name}")
+        self.last_provider = name
+
     def _try_providers(
         self,
         should_try,
@@ -114,12 +194,7 @@ class ProviderManager:
                 continue
             try:
                 response = state.provider.generate(**request)
-                state.failures = 0
-                state.cooldown_until = 0.0
-                errors.pop(name, None)
-                if self.last_provider != name:
-                    logger.info(f"LLM provider in use: {name}")
-                self.last_provider = name
+                self._note_success(state, errors)
                 return response
             except ProviderError as e:
                 errors[name] = e

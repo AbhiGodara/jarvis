@@ -8,6 +8,7 @@ from .base import (
     LLMProvider,
     ProviderError,
     ProviderResponse,
+    StreamInterruptedError,
 )
 from .manager import ProviderManager, build_manager_from_config
 
@@ -16,6 +17,7 @@ __all__ = [
     "LLMProvider",
     "ProviderError",
     "ProviderResponse",
+    "StreamInterruptedError",
     "ProviderManager",
     "build_manager_from_config",
 ]

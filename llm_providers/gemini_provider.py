@@ -22,24 +22,45 @@ class GeminiProvider(LLMProvider):
         self.model = model
         self.client = genai.Client(api_key=api_key)
 
-    def generate(
-        self,
-        system: str,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        temperature: float = 0.7,
-    ) -> ProviderResponse:
+    def _build_contents(self, messages: list[dict]) -> list:
+        """Translate the provider-neutral message list.
+
+        Mk-III Phase 4 adds two structured shapes for the tool-result loop:
+          {"role": "assistant", "tool_call": {"name", "args", "id"}}
+          {"role": "tool", "name", "content", "id"}
+        mapped to Gemini FunctionCall / FunctionResponse parts. The Gemini API
+        only accepts user|model roles: function calls ride on "model",
+        function responses on "user".
+        """
         t = self._types
+        contents = []
+        for m in messages:
+            tool_call = m.get("tool_call")
+            if m["role"] == "assistant" and tool_call:
+                contents.append(t.Content(
+                    role="model",
+                    parts=[t.Part(function_call=t.FunctionCall(
+                        name=tool_call["name"],
+                        args=tool_call.get("args", {}),
+                    ))],
+                ))
+            elif m["role"] == "tool":
+                contents.append(t.Content(
+                    role="user",
+                    parts=[t.Part(function_response=t.FunctionResponse(
+                        name=m.get("name", ""),
+                        response={"result": m.get("content", "")},
+                    ))],
+                ))
+            elif m.get("content"):
+                contents.append(t.Content(
+                    role="model" if m["role"] == "assistant" else "user",
+                    parts=[t.Part(text=m["content"])],
+                ))
+        return contents
 
-        contents = [
-            t.Content(
-                role="model" if m["role"] == "assistant" else "user",
-                parts=[t.Part(text=m["content"])],
-            )
-            for m in messages
-            if m.get("content")
-        ]
-
+    def _base_config_kwargs(self, system: str, temperature: float) -> dict:
+        t = self._types
         config_kwargs = {"system_instruction": system, "temperature": temperature}
 
         # Gemini 2.5 models "think" before answering by default (~2.5s/call
@@ -50,6 +71,19 @@ class GeminiProvider(LLMProvider):
                 config_kwargs["thinking_config"] = t.ThinkingConfig(thinking_budget=0)
             except Exception:
                 pass
+        return config_kwargs
+
+    def generate(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        temperature: float = 0.7,
+    ) -> ProviderResponse:
+        t = self._types
+
+        contents = self._build_contents(messages)
+        config_kwargs = self._base_config_kwargs(system, temperature)
 
         if tools:
             declarations = [
@@ -93,3 +127,23 @@ class GeminiProvider(LLMProvider):
 
         result.text = response.text.strip() if response.text else None
         return result
+
+    def generate_stream(self, system, messages, temperature=0.7):
+        """Yield text deltas via generate_content_stream (text-only)."""
+        t = self._types
+        contents = self._build_contents(messages)
+        config_kwargs = self._base_config_kwargs(system, temperature)
+        try:
+            stream = self.client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=t.GenerateContentConfig(**config_kwargs),
+            )
+            for chunk in stream:
+                text = getattr(chunk, "text", None)
+                if text:
+                    yield text
+        except Exception as e:
+            # Raised mid-iteration too — the manager decides whether this is
+            # a pre-first-token failover or a StreamInterruptedError.
+            raise ProviderError.from_exception(e) from e

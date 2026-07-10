@@ -16,6 +16,7 @@ Tool schema format (provider-neutral, what the command registry produces):
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 
@@ -69,6 +70,22 @@ class AllProvidersFailedError(Exception):
         return bool(self.errors) and all(e.quota for e in self.errors.values())
 
 
+class StreamInterruptedError(Exception):
+    """A streamed answer failed AFTER emitting text (Mk-III Phase 1).
+
+    Failover is impossible at this point — switching providers mid-answer
+    would audibly change register and content — so the manager stops the
+    stream and hands the caller what was already said.
+    """
+
+    def __init__(self, partial_text: str, cause: ProviderError):
+        self.partial_text = partial_text
+        self.cause = cause
+        super().__init__(
+            f"Stream interrupted after {len(partial_text)} chars: {cause}"
+        )
+
+
 @dataclass
 class ProviderResponse:
     """Normalized result of one generation call."""
@@ -100,3 +117,20 @@ class LLMProvider(ABC):
     ) -> ProviderResponse:
         """Run one generation. Returns text OR a tool call."""
         raise NotImplementedError
+
+    def generate_stream(
+        self,
+        system: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+    ) -> Iterator[str]:
+        """Yield the answer as text deltas (Mk-III Phase 1).
+
+        Text-only: tool-calling requests keep using generate() — partial tool
+        calls are never streamed. This default runs the non-streaming
+        generate() and yields the full text once, so a provider works
+        unmodified before it grows a native streaming path.
+        """
+        response = self.generate(system, messages, tools=None, temperature=temperature)
+        if response.text:
+            yield response.text
